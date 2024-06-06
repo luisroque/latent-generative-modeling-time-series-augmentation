@@ -1,60 +1,12 @@
-import os
-import tempfile
-import matplotlib.pyplot as plt
 from lgta.model.create_dataset_versions_vae import (
     CreateTransformedVersionsCVAE,
 )
-from lgta.feature_engineering.feature_transformations import detemporalize
-from lgta.visualization.comparison_analysis import (
-    plot_transformations_with_generate_datasets,
-    plot_series_comparisons,
-)
-from lgta.model.generate_data import generate_datasets
-from lgta.evaluation.evaluation_comparison import (
-    standardize_and_calculate_residuals,
-    analyze_transformations,
-)
-from lgta.postprocessing.postprocessing_comparison import (
-    process_transformations,
-    create_prediction_comparison_dataset,
-    create_distance_metrics_dataset,
-    create_reconstruction_error_percentage_dataset,
-)
-from lgta.e2e.e2e_processing import e2e_transformation
-from keras.callbacks import ModelCheckpoint, EarlyStopping
 import os
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from typing import Optional, List
-
-from sklearn.preprocessing import MinMaxScaler
-
 from tensorflow import keras
-from keras.callbacks import EarlyStopping, ModelCheckpoint
+from keras.callbacks import EarlyStopping
 
-from lgta.model.models import CVAE, get_CVAE, get_flatten_size_encoder
-from lgta.feature_engineering.static_features import (
-    create_static_features,
-)
-from lgta.feature_engineering.dynamic_features import (
-    create_dynamic_features,
-)
-from lgta.feature_engineering.feature_transformations import (
-    temporalize,
-    combine_inputs_to_model,
-    detemporalize,
-)
-from lgta.postprocessing.generative_helper import generate_new_time_series
-from lgta.visualization.model_visualization import (
-    plot_generated_vs_original,
-)
+from lgta.model.models import CVAE, get_CVAE
 
-from lgta.preprocessing.pre_processing_datasets import (
-    PreprocessDatasets as ppc,
-)
-
-from lgta import __version__
 
 dataset = "tourism"
 freq = "M"
