@@ -23,20 +23,21 @@ from lgta.e2e.e2e_processing import e2e_transformation
 
 dataset = "tourism"
 freq = "M"
+top = None
 
 # For M5 dataset
-# dataset='m5'
-# freq='W'
-# top=500
+# dataset = "m5"
+# freq = "W"
+# top = 500
 
 # For police dataset
-# dataset='police'
-# freq='D'
-# top=500
+# dataset = "police"
+# freq = "D"
+# top = 500
 
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
-    dataset_name=dataset, freq=freq, dynamic_feat_trig=False
+    dataset_name=dataset, freq=freq, top=top, dynamic_feat_trig=False
 )
 model, _, _ = create_dataset_vae.fit()
 dynamic_feat, X_inp, static_feat = create_dataset_vae.features_input

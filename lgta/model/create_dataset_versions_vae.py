@@ -184,7 +184,7 @@ class CreateTransformedVersionsCVAE:
         """
         # Create directory to store transformed datasets if does not exist
         Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}data/transformed_datasets").mkdir(
+        Path(f"{self.input_dir}assets/data/transformed_datasets").mkdir(
             parents=True, exist_ok=True
         )
 
@@ -193,7 +193,7 @@ class CreateTransformedVersionsCVAE:
         Store original dataset
         """
         with open(
-            f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_original.npy",
+            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
             "wb",
         ) as f:
             np.save(f, self.y)
@@ -215,7 +215,7 @@ class CreateTransformedVersionsCVAE:
         :param transformation: name of the transformation applied
         """
         with open(
-            f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
+            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
             "wb",
         ) as f:
             np.save(f, y_new)

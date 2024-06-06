@@ -1,5 +1,5 @@
 import numpy as np
-from tsaugmentation.transformations.create_dataset_versions import (
+from lgta.transformations.create_dataset_versions import (
     CreateTransformedVersions,
 )
 from sklearn.preprocessing import StandardScaler

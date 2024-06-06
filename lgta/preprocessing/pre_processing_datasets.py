@@ -50,7 +50,7 @@ class PreprocessDatasets:
         dataset: str,
         freq: str,
         input_dir: str = "./",
-        top: int = 500,
+        top: int = None,
         test_size: int = None,
         sample_perc: float = None,
         weekly_m5: bool = True,
@@ -85,15 +85,16 @@ class PreprocessDatasets:
         self.n = {"prison": 48, "tourism": 228, "m5": 275, "police": 334}
 
         self.pickle_path = (
-            f"{self.input_dir}data/original_datasets/"
+            f"{self.input_dir}assets/data/original_datasets/"
             f"{self.dataset}_groups_{self.freq}_{self.sample_perc_int}_"
             f"{self.test_size}_{self.top}.pickle"
         )
+        pass
 
     def _create_directories(self):
         # Create directory to store original datasets if does not exist
         Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}data/original_datasets").mkdir(
+        Path(f"{self.input_dir}assets/data/original_datasets").mkdir(
             parents=True, exist_ok=True
         )
 
@@ -131,7 +132,9 @@ class PreprocessDatasets:
         return (x + offset).floor(freq) - offset
 
     def _get_dataset_path(self, file_type="csv"):
-        path = f"{self.input_dir}data/original_datasets/{self.dataset}.{file_type}"
+        path = (
+            f"{self.input_dir}assets/data/original_datasets/{self.dataset}.{file_type}"
+        )
         if not os.path.isfile(path):
             try:
                 request.urlretrieve(f"{self.api}{self.dataset}", path)
@@ -305,9 +308,9 @@ class PreprocessDatasets:
             return {}
 
         with zipfile.ZipFile(path, "r") as zip_ref:
-            zip_ref.extractall(f"{self.input_dir}data/original_datasets/")
+            zip_ref.extractall(f"{self.input_dir}assets/data/original_datasets/")
 
-        input_dir = f"{self.input_dir}data/original_datasets/m5-data"
+        input_dir = f"{self.input_dir}assets/data/original_datasets/m5-data"
         cal = pd.read_csv(f"{input_dir}/calendar.csv")
         stv = pd.read_csv(f"{input_dir}/sales_train_validation.csv")
 

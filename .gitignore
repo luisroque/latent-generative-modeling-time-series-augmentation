@@ -168,7 +168,7 @@ model_weights/
 # data related
 original_datasets/
 transformed_datasets/
-data/
+assets/data/
 results/
 plots/
 logs/

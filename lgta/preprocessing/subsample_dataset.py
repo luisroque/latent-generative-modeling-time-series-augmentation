@@ -20,29 +20,25 @@ class CreateGroups:
     def create_subsampled_groups(self) -> dict:
         """Creates subsampled groups from the dataset and stores them in a pickle file."""
         groups = self._preprocess_dataset(self.sample_perc)
-        file_path = (
-            f"./data/subsampled_datasets/{self.dataset_name}_{self.sample_int_perc}.pkl"
-        )
+        file_path = f"./assets/data/subsampled_datasets/{self.dataset_name}_{self.sample_int_perc}.pkl"
         self._store_groups(groups, file_path)
         return groups
 
     def create_original_groups(self) -> dict:
         """Creates original groups from the dataset and stores them in a pickle file."""
         groups = self._preprocess_dataset()
-        file_path = f"./data/original_datasets/{self.dataset_name}.pkl"
+        file_path = f"./assets/data/original_datasets/{self.dataset_name}.pkl"
         self._store_groups(groups, file_path)
         return groups
 
     def read_subsampled_groups(self) -> dict:
         """Loads subsampled groups from a pickle file."""
-        file_path = (
-            f"./data/subsampled_datasets/{self.dataset_name}_{self.sample_int_perc}.pkl"
-        )
+        file_path = f"./assets/data/subsampled_datasets/{self.dataset_name}_{self.sample_int_perc}.pkl"
         return self._read_groups(file_path)
 
     def read_original_groups(self) -> dict:
         """Loads original groups from a pickle file."""
-        file_path = f"./data/original_datasets/{self.dataset_name}.pkl"
+        file_path = f"./assets/data/original_datasets/{self.dataset_name}.pkl"
         return self._read_groups(file_path)
 
     def _preprocess_dataset(self, sample_perc: float = None) -> dict:

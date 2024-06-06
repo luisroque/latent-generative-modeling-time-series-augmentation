@@ -20,8 +20,8 @@ class TestBuildingDistancePlots(unittest.TestCase):
         self.versions = 6
         self.transformations = ["jitter", "scaling", "magnitude_warp", "time_warp"]
         self.data_orig, self.data_transf = get_data(
-            f"{base_path}/data/transformed_datasets",
-            f"{base_path}/data/transformed_datasets",
+            f"{base_path}/assets/data/transformed_datasets",
+            f"{base_path}/assets/data/transformed_datasets",
             self.dataset,
             transformations=self.transformations,
             versions=self.versions,

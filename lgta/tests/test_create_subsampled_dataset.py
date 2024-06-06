@@ -13,7 +13,7 @@ class TestCreateGroups(unittest.TestCase):
     def test_create_subsample_dataset(self):
         expected_filename = f"{self.dataset_name_t}_{int(self.sample_perc * 100)}.pkl"
         expected_filepath = os.path.join(
-            "./data/subsampled_datasets", expected_filename
+            "./assets/data/subsampled_datasets", expected_filename
         )
 
         # Delete the file if it already exists to ensure the test is valid
