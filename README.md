@@ -2,14 +2,14 @@
 
 This repository contains the implementation of L-GTA, a novel methodology for time series augmentation leveraging transformer-based variational autoencoders. L-GTA introduces controlled transformations within the latent space to generate semi-synthetic time series data while preserving the intrinsic properties of the original dataset. This approach provides more reliable and consistent augmented data, enhancing predictive accuracy and similarity measures compared to traditional direct transformation methods. Figure 1 shows a diagram depicting the L-GTA framework for augmenting time series data. 
 
-### Installation
+## Installation
 After the peer review you will be able to install L-GTA as a Python package:
 
 ```python
 pip install lgta
 ```
 
-### Functionality
+## Functionality
 The main features of this repository include:
 
 * **L-GTA Methodology**: Implementation of the L-GTA model, combining transformers, Bi-LSTMs, CVAEs, and a Variational Multi-Head Attention (VMHA) mechanism to generate semi-synthetic time series data.
@@ -18,9 +18,9 @@ The main features of this repository include:
 * **Evaluation Framework**: Methods for assessing the fidelity and predictive performance of the augmented data compared to original datasets.
 
 
-###Getting Started
+## Getting Started
 
-The code below demonstrates how to generate new versions of a sample time series dataset by applying L-GTA's latent space transformations.
+The code below demonstrates how to generate new versions of a sample time series dataset by applying L-GTA's latent space transformations. For a more detailed script for experiments please see the `testing_benchmark_vs_lgta.py` file in `lgta/experiments/`.
 
 ```python
 from lgta.model.create_dataset_versions_vae import (
@@ -114,18 +114,18 @@ for transformation in transformations:
     )
 ```
 
-### Experimental Results
+## Experimental Results
 
 We conducted extensive experiments to evaluate the impact of L-GTA on time series augmentation across multiple real-world datasets. The primary findings from our analysis are summarized below:
 
-#### Key Findings
+### Key Findings
 
 1. **Comparison of Augmentation Methods (Q1)**: 
    - **Figure 2**: The comparison of jittering and magnitude warping transformations using L-GTA and direct methods on time series data. L-GTA produces consistent transformations with slight fluctuations or stretched magnitudes without introducing extreme values or artificial distortions. In contrast, direct transformations occasionally lead to erratic series deviations.
    - **Figure 3**: Distribution of residuals for jittering transformation shows skewed residuals for direct methods, indicating a bias not present in L-GTA. L-GTA manages to avoid this skewness by learning from the original data patterns.
 
 2. **Consistency of Transformations (Q2)**:
-   - L-GTA consistently produces transformations that maintain the intrinsic patterns and characteristics of the original time series. This is particularly evident in transformations like magnitude warping, where direct methods sometimes lead to extreme distortions, while L-GTA maintains a more regular and controlled transformation.
+   - **Figure 2**: L-GTA consistently produces transformations that maintain the intrinsic patterns and characteristics of the original time series. This is particularly evident in transformations like magnitude warping, where direct methods sometimes lead to extreme distortions, while L-GTA maintains a more regular and controlled transformation.
 
 3. **Distribution of Distances (Q3)**:
    - **Figure 4**: Pairwise Wasserstein distances for the Tourism dataset show that L-GTA exhibits a more concentrated distribution with fewer outliers and reduced skewness compared to direct methods.
@@ -137,7 +137,7 @@ We conducted extensive experiments to evaluate the impact of L-GTA on time serie
 5. **Predictive Performance (Q4)**:
    - **Table 3**: Prediction error analysis using a simple RNN model shows that L-GTA maintains predictive performance close to the original datasets across different transformations, demonstrating its ability to preserve the predictive characteristics of the original time series. Direct methods, on the other hand, show greater deviations from the original performance.
 
-#### Figures and Tables
+### Figures and Tables
 
 **Figure 1: Diagram depicting the L-GTA framework for augmenting time series data. This method combines Bi-LSTMs and CVAEs with a Variational Multi-Head Attention (VMHA) mechanism to generate semi-synthetic time series data. The learned latent space is transformed by applying time series augmentation
 techniques such as jittering and magnitude warping.**
@@ -189,8 +189,8 @@ techniques such as jittering and magnitude warping.](lgta/assets/model_architect
 |                 | Magnitude Warp   | 0.037    | 0.037  | 0.038  |
 |                 | Scaling          | 0.037    | 0.037  | 0.038  |
 
-### Contributing
+## Contributing
 We welcome contributions to L-GTA. If you find a bug or have ideas for new features, please open an issue or submit a pull request.
 
-### License
+## License
 This repository is licensed under the BSD 3-Clause License. See the LICENSE file for more information.
