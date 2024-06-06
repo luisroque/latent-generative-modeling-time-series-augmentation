@@ -9,11 +9,10 @@ from keras.layers import (
     Reshape,
     Flatten,
     Dense,
-    Dropout,
-    RepeatVector,
-    Embedding,
     MultiHeadAttention,
+    Attention,
     LayerNormalization,
+    GlobalAveragePooling1D,
 )
 from keras.regularizers import l2
 from keras.layers import Dropout, RepeatVector, Embedding
@@ -21,14 +20,6 @@ from keras import backend as K
 import numpy as np
 from .helper import Sampling
 from keras.models import Model
-
-
-batch_size = 32
-seq_length = 10
-embed_dim = 64
-num_heads = 8
-ff_dim = 256
-max_seq_len = 10
 
 
 def get_positional_encoding(max_seq_len, embed_dim):
@@ -70,7 +61,7 @@ class TransformerBlockWithPosEncoding(tf.keras.layers.Layer):
         self.pos_encoding = get_positional_encoding(self.max_seq_len, embed_dim)[
             tf.newaxis, ...
         ]
-        self.att = MultiHeadAttention(
+        self.mhatt = MultiHeadAttention(
             num_heads=self.num_heads, key_dim=embed_dim, name="multi_head_attention"
         )
         self.ffn = tf.keras.Sequential(
@@ -91,12 +82,15 @@ class TransformerBlockWithPosEncoding(tf.keras.layers.Layer):
         embed_dim = tf.shape(inputs)[-1]
         pos_encoding = self.pos_encoding[:, :seq_len, :embed_dim]
         inputs += pos_encoding
-        attn_output = self.att(inputs, inputs)
+        attn_output = self.mhatt(inputs, inputs)
         attn_output = self.dropout1(attn_output, training=training)
         out1 = self.layernorm1(inputs + attn_output)
         ffn_output = self.ffn(out1)
         ffn_output = self.dropout2(ffn_output, training=training)
-        return self.layernorm2(out1 + ffn_output)
+        ffn_output = self.layernorm2(out1 + ffn_output)
+        context_vector = tf.reduce_mean(ffn_output, axis=1)
+
+        return context_vector
 
     def get_config(self):
         config = super(TransformerBlockWithPosEncoding, self).get_config()
@@ -217,6 +211,9 @@ def get_flatten_size_encoder(
     window_size: int,
     n_features: int,
     n_features_concat: int,
+    num_heads: int = 8,
+    ff_dim: int = 256,
+    max_seq_len: int = 10,
 ) -> int:
     inp = Input(shape=(window_size, n_features), name="input_main")
 
@@ -259,6 +256,15 @@ def get_flatten_size_encoder(
     return flatten_size
 
 
+class PrintShapeLayer(tf.keras.layers.Layer):
+    def __init__(self, name=None):
+        super(PrintShapeLayer, self).__init__(name=name)
+
+    def call(self, inputs):
+        tf.print(f"{self.name} input shape:", tf.shape(inputs))
+        return inputs
+
+
 def get_CVAE(
     static_features: list,
     dynamic_features: list,
@@ -267,6 +273,9 @@ def get_CVAE(
     n_features_concat: int,
     latent_dim: int,
     embedding_dim: int,
+    num_heads: int = 8,
+    ff_dim: int = 256,
+    max_seq_len: int = 10,
 ) -> tuple[keras.Model, keras.Model]:
     inp = Input(shape=(window_size, n_features), name="input_main_CVAE")
 
@@ -305,9 +314,8 @@ def get_CVAE(
         static_feat_emb.append(emb_static_feat)
 
     enc = Concatenate(name="concat_encoder_inputs_CVAE")(dynamic_features_emb + [inp])
-    enc = TransformerBlockWithPosEncoding(
-        num_heads, ff_dim, max_seq_len, name="transformer_block_CVAE"
-    )(enc)
+
+    print("enc_before_lstm.shape:", enc.shape)
 
     enc = Bidirectional(
         LSTM(
@@ -317,9 +325,21 @@ def get_CVAE(
             dropout=0.5,
             kernel_regularizer=l2(0.001),
             name="bidirectional_lstm_CVAE",
+            return_sequences=True,
         ),
         merge_mode="ave",
     )(enc)
+
+    print("enc_before_transf.shape:", enc.shape)
+
+    enc = TransformerBlockWithPosEncoding(
+        num_heads=num_heads,
+        ff_dim=ff_dim,
+        max_seq_len=window_size,
+        name="transformer_block_CVAE",
+    )(enc)
+
+    print("enc_after_transf.shape:", enc.shape)
 
     enc = Dropout(0.5, name="dropout_CVAE")(enc)
     enc = Concatenate(name="concat_encoder_final_CVAE")([enc] + static_feat_emb)

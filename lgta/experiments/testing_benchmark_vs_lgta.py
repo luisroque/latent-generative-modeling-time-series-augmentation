@@ -110,11 +110,11 @@ plot_transformations_with_generate_datasets(
 # e2e comparison
 ######################
 
-
+# Parameters Tourism
 transformations = [
     {
         "transformation": "jitter",
-        "params": [0.9],
+        "params": [0.875],
         "parameters_benchmark": {
             "jitter": 0.375,
             "scaling": 0.1,
