@@ -215,7 +215,7 @@ def compute_and_print_errors(X_orig, X_hat_transf, X_benchmark):
 def summarize_and_plot_distributions(distances_lgta, distances_benchmark, title):
     # Calculate metrics
     metrics_lgta = {
-        "Mean": np.median(distances_lgta),
+        "Mean": np.mean(distances_lgta),
         "Median": np.median(distances_lgta),
         "IQR": iqr(distances_lgta),
         "Skewness": skew(distances_lgta),
@@ -223,7 +223,7 @@ def summarize_and_plot_distributions(distances_lgta, distances_benchmark, title)
     }
 
     metrics_benchmark = {
-        "Mean": np.median(distances_benchmark),
+        "Mean": np.mean(distances_benchmark),
         "Median": np.median(distances_benchmark),
         "IQR": iqr(distances_benchmark),
         "Skewness": skew(distances_benchmark),

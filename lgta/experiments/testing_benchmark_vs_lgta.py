@@ -136,7 +136,7 @@ transformations = [
     },
     {
         "transformation": "magnitude_warp",
-        "params": [0.4],
+        "params": [0.45],
         "parameters_benchmark": {
             "jitter": 0.375,
             "scaling": 0.1,
