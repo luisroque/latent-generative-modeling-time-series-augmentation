@@ -163,7 +163,7 @@ cython_debug/
 *__pycache__*
 
 model_binaries/
-model_weights/
+assets/model_weights/
 
 # data related
 original_datasets/
@@ -184,3 +184,7 @@ build/
 *.log
 *.txt
 *.csv
+
+*.DS_Store
+assets
+

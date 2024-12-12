@@ -32,7 +32,7 @@ class Visualizer:
 
     def _read_files(self, method):
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset}_original.npy",
+            f"{self.input_dir}data/transformed_datasets/{self.dataset}_original.npy",
             "rb",
         ) as f:
             self.y = np.load(f)
@@ -40,7 +40,7 @@ class Visualizer:
         y_new = []
         for version in range(1, self.n_versions + 1):
             with open(
-                f"{self.input_dir}assets/data/transformed_datasets/{self.dataset}_version_{version}_10samples_{method}_{self.transf_data}.npy",
+                f"{self.input_dir}data/transformed_datasets/{self.dataset}_version_{version}_10samples_{method}_{self.transf_data}.npy",
                 "rb",
             ) as f_new:
                 y_ver = np.load(f_new)

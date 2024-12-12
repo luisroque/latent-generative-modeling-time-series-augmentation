@@ -7,9 +7,9 @@ from typing import Optional, List
 from sklearn.preprocessing import MinMaxScaler
 
 from tensorflow import keras
-from keras.callbacks import EarlyStopping, ModelCheckpoint
+from keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
-from lgta.model.models import CVAE, get_CVAE, get_flatten_size_encoder
+from lgta.model.models import CVAE, get_CVAE
 from lgta.feature_engineering.static_features import (
     create_static_features,
 )
@@ -79,10 +79,10 @@ class CreateTransformedVersionsCVAE:
         self,
         dataset_name: str,
         freq: str,
-        input_dir: str = "./",
+        input_dir: str = "./assets/",
         transf_data: str = "whole",
         top: int = None,
-        window_size: int = 10,
+        window_size: int = 12,
         weekly_m5: bool = True,
         test_size: int = None,
         dynamic_feat_trig: bool = True,
@@ -108,7 +108,7 @@ class CreateTransformedVersionsCVAE:
         self.dataset = self._get_dataset()
         if window_size:
             self.window_size = window_size
-        data = self.dataset["predict"]["data_matrix"]
+        data = self.dataset["predict"]["data"]
         self.y = data
         self.n = data.shape[0]
         self.s = data.shape[1]
@@ -184,7 +184,7 @@ class CreateTransformedVersionsCVAE:
         """
         # Create directory to store transformed datasets if does not exist
         Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}assets/data/transformed_datasets").mkdir(
+        Path(f"{self.input_dir}data/transformed_datasets").mkdir(
             parents=True, exist_ok=True
         )
 
@@ -193,7 +193,7 @@ class CreateTransformedVersionsCVAE:
         Store original dataset
         """
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
+            f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_original.npy",
             "wb",
         ) as f:
             np.save(f, self.y)
@@ -215,7 +215,7 @@ class CreateTransformedVersionsCVAE:
         :param transformation: name of the transformation applied
         """
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
+            f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
             "wb",
         ) as f:
             np.save(f, y_new)
@@ -229,66 +229,70 @@ class CreateTransformedVersionsCVAE:
         self.static_features = create_static_features(self.groups, self.dataset)
 
     def _feature_engineering(
-        self, n: int
-    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
-        """Create static and dynamic features as well as apply preprocess to raw time series
+        self, n: int, val_steps: float = 24
+    ) -> tuple[tuple, tuple]:
+        """Create static and dynamic features as well as apply preprocessing to raw time series,
+           including train-validation split.
 
         Args:
-            n: number of samples
+            n: Total number of samples
+            val_steps: Number of data points to use for validation
+
+        Returns:
+            Tuple containing processed training and validation feature inputs.
         """
         self.X_train_raw = self.df.astype(np.float32).to_numpy()
+        data = self.df.astype(np.float32).to_numpy()
 
-        self.scaler_target = MinMaxScaler().fit(self.X_train_raw)
-        X_train_raw_scaled = self.scaler_target.transform(self.X_train_raw)
+        num_train_samples = len(data) - val_steps
+        train_data, val_data = data[:num_train_samples], data[num_train_samples:]
+
+        self.scaler_target = MinMaxScaler().fit(train_data)
+        train_data_scaled = self.scaler_target.transform(train_data)
 
         self._generate_static_features(n)
 
-        if n == self.n:
-            # if we want to generate new time series with the same size
-            # as the original ones
-            self.dynamic_features = create_dynamic_features(
-                self.df_generate, self.freq, trigonometric=self.dynamic_feat_trig
-            )
-        else:
-            self.dynamic_features = create_dynamic_features(
-                self.df, self.freq, trigonometric=self.dynamic_feat_trig
-            )
+        self.dynamic_features_train = create_dynamic_features(
+            self.df[:num_train_samples], self.freq, trigonometric=self.dynamic_feat_trig
+        )
 
-        X_train = temporalize(X_train_raw_scaled, self.window_size)
+        X_train = temporalize(train_data_scaled, self.window_size)
 
-        self.n_features_concat = X_train.shape[1] + self.dynamic_features.shape[1]
+        self.n_features_concat = X_train.shape[1] + self.dynamic_features_train.shape[1]
 
-        (
-            self.dynamic_features_inp,
-            X_inp,
-            self.static_features_inp,
-        ) = combine_inputs_to_model(
+        inp_train = combine_inputs_to_model(
             X_train,
-            self.dynamic_features,
+            self.dynamic_features_train,
             self.static_features,
             self.window_size,
         )
 
-        return self.dynamic_features_inp, X_inp, self.static_features_inp
+        if val_steps > 0:
+            val_data_scaled = self.scaler_target.transform(val_data)
+            self.dynamic_features_val = create_dynamic_features(
+                self.df[num_train_samples:],
+                self.freq,
+                trigonometric=self.dynamic_feat_trig,
+            )
+            X_val = temporalize(val_data_scaled, self.window_size)
 
-    def get_flatten_size_encoder(self):
-        _ = self._feature_engineering(self.n_train)
-        flatten_size = get_flatten_size_encoder(
-            static_features=self.static_features,
-            dynamic_features_df=self.dynamic_features,
-            window_size=self.window_size,
-            n_features=self.n_features,
-            n_features_concat=self.n_features_concat,
-        )
+            inp_val = combine_inputs_to_model(
+                X_val,
+                self.dynamic_features_val,
+                self.static_features,
+                self.window_size,
+            )
+        else:
+            inp_val = None
 
-        return flatten_size
+        return inp_train, inp_val
 
     def fit(
         self,
         epochs: int = 750,
-        batch_size: int = 5,
-        patience: int = 30,
-        latent_dim: int = 2,
+        batch_size: int = 8,
+        patience: int = 15,
+        latent_dim: int = 10,
         learning_rate: float = 0.001,
         hyper_tuning: bool = False,
         load_weights: bool = True,
@@ -304,43 +308,57 @@ class CreateTransformedVersionsCVAE:
 
         :return: model trained
         """
-        self.features_input = self._feature_engineering(self.n_train)
-
-        encoder, decoder = get_CVAE(
-            static_features=self.features_input[2],
-            dynamic_features=self.features_input[0],
-            window_size=self.window_size,
-            n_features=self.n_features,
-            n_features_concat=self.n_features_concat,
-            latent_dim=latent_dim,
-            embedding_dim=8,
+        self.features_input_train, self.features_input_val = self._feature_engineering(
+            self.n_train
         )
 
-        cvae = CVAE(encoder, decoder, self.window_size)
-        cvae.compile(optimizer=keras.optimizers.Adam(learning_rate=learning_rate))
+        dynamic_features_dim = len(self.features_input_train[0])
+
+        encoder, decoder = get_CVAE(
+            # dynamic_features=self.features_input_train[0],
+            window_size=self.window_size,
+            n_features=self.n_features,
+            # n_features_concat=self.n_features_concat,
+            latent_dim=latent_dim,
+            dynamic_features_dim=dynamic_features_dim,
+        )
+
+        cvae = CVAE(encoder, decoder, kl_weight=3)
+        cvae.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+            metrics=[cvae.reconstruction_loss_tracker, cvae.kl_loss_tracker],
+        )
 
         # Build the model by calling it on a batch of data
-        _ = cvae(self.features_input)
+        _ = cvae(self.features_input_train)
         cvae.summary()
 
         es = EarlyStopping(
             patience=patience,
             verbose=1,
-            monitor="loss",
+            monitor="val_loss",
             mode="auto",
             restore_best_weights=True,
         )
 
-        weights_folder = "model_weights"
+        reduce_lr = ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6, verbose=1
+        )
+
+        # kl_annealing_cb = KLDAnnealingCallback(
+        #     model=cvae, start_weight=0.0, max_weight=1.0, anneal_epochs=30
+        # )
+
+        weights_folder = "assets/model_weights"
         os.makedirs(weights_folder, exist_ok=True)
 
         weights_file = os.path.join(
-            weights_folder, f"{self.dataset_name}_vae_weights.h5"
+            weights_folder, f"{self.dataset_name}_vae.weights.h5"
         )
         history = None
 
         if os.path.exists(weights_file) and not hyper_tuning and load_weights:
-            _ = cvae(self.features_input)
+            _ = cvae(self.features_input_train)
             print("Loading existing weights...")
             cvae.load_weights(weights_file)
         else:
@@ -349,23 +367,24 @@ class CreateTransformedVersionsCVAE:
                 weights_file,
                 save_best_only=True,
                 save_weights_only=True,
-                monitor="loss",
+                monitor="val_loss",
                 mode="auto",
                 verbose=1,
             )
 
             history = cvae.fit(
-                x=self.features_input,
+                x=self.features_input_train,
+                validation_data=self.features_input_val,
                 epochs=epochs,
                 batch_size=batch_size,
                 shuffle=False,
-                callbacks=[es, mc],
+                callbacks=[es, mc, reduce_lr],
             )
 
-        return cvae, history, es
+        return cvae, history.history, es
 
     def predict(
-        self, cvae: CVAE, similar_static_features: int = None
+        self, cvae: CVAE
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Predict original time series using CVAE
 
@@ -379,23 +398,10 @@ class CreateTransformedVersionsCVAE:
             the encoder
 
         """
+        self.features_input, _ = self._feature_engineering(self.n_train, val_steps=0)
         dynamic_feat, X_inp, static_feat = self.features_input
 
-        if similar_static_features:
-            sim_static_features = []
-            for i in range(len(static_feat)):
-                sim_static_features.append(
-                    np.zeros((self.n_train, self.n_features, 1))
-                    + static_feat[i][:, similar_static_features]
-                )
-
-            z_mean, z_log_var, z = cvae.encoder.predict(
-                dynamic_feat + X_inp + sim_static_features
-            )
-        else:
-            z_mean, z_log_var, z = cvae.encoder.predict(
-                dynamic_feat + X_inp + static_feat
-            )
+        z_mean, z_log_var, z = cvae.encoder.predict(dynamic_feat + X_inp + static_feat)
 
         preds = cvae.decoder.predict([z] + dynamic_feat + static_feat)
         preds = detemporalize(preds, self.window_size)

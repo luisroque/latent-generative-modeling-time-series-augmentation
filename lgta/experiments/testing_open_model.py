@@ -10,7 +10,7 @@ from lgta.model.models import CVAE, get_CVAE
 
 dataset = "tourism"
 freq = "M"
-weights_file = "model_weights/tourism_vae_weights.h5"
+weights_file = "assets/model_weights/tourism_vae_orig.weights.h5"
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
     dataset_name=dataset, freq=freq, dynamic_feat_trig=False
@@ -42,16 +42,16 @@ try:
     es = EarlyStopping(
         patience=30,
         verbose=1,
-        monitor="loss",
+        monitor="val_loss",
         mode="auto",
         restore_best_weights=True,
     )
 
-    weights_folder = "model_weights"
+    weights_folder = "assets/model_weights"
     os.makedirs(weights_folder, exist_ok=True)
 
     weights_file = os.path.join(
-        weights_folder, f"{create_dataset_vae.dataset_name}_vae_weights.h5"
+        weights_folder, f"{create_dataset_vae.dataset_name}_vae.weights.h5"
     )
     history = None
 
@@ -62,7 +62,6 @@ try:
 except Exception as e:
     print(f"Error loading weights: {e}")
 
-# Display model summary
 print("Model summary:")
 create_dataset_vae.cvae.summary()
 

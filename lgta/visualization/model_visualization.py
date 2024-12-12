@@ -3,27 +3,38 @@ from keras.callbacks import History
 import numpy as np
 
 
-def plot_loss(history: History, first_index: int, dataset_name: str) -> None:
-    """
-    Plot total loss, reconstruction loss and kl_loss per epoch
+def plot_loss(history_dict):
+    plt.figure(figsize=(12, 8))
 
-    :param history: recorded loss
-    :param first_index: first index of the loss arrays to plot to avoid hard to read plots
-    :param dataset_name: name of the dataset to plot and store
-    """
+    # Total Loss
+    plt.subplot(2, 1, 1)
+    plt.plot(history_dict["loss"], label="Training Loss")
+    plt.plot(history_dict["val_loss"], label="Validation Loss")
+    plt.title("Total Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.legend()
 
-    _, ax = plt.subplots(1, 1, figsize=(8, 6))
-
-    ax.plot(history.history["loss"][first_index:])
-    ax.plot(history.history["reconstruction_loss"][first_index:])
-    ax.plot(history.history["kl_loss"][first_index:])
-    ax.set_title("model loss")
-    ax.set_ylabel("loss")
-    ax.set_xlabel("epoch")
-    plt.legend(["total_loss", "reconstruction_loss", "kl_loss"], loc="upper left")
-    plt.savefig(
-        f"./plots/vae_loss_{dataset_name}.pdf", format="pdf", bbox_inches="tight"
+    # Reconstruction Loss
+    plt.subplot(2, 1, 2)
+    plt.plot(history_dict["reconstruction_loss"], label="Training Reconstruction Loss")
+    plt.plot(
+        history_dict["val_reconstruction_loss"], label="Validation Reconstruction Loss"
     )
+    plt.title("Reconstruction Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.legend()
+
+    # KL Loss
+    plt.figure(figsize=(12, 4))
+    plt.plot(history_dict["kl_loss"], label="Training KL Loss")
+    plt.plot(history_dict["val_kl_loss"], label="Validation KL Loss")
+    plt.title("KL Divergence Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.legend()
+
     plt.show()
 
 

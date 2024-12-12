@@ -1,3 +1,4 @@
+import tensorflow as tf
 from lgta.transformations import ManipulateData
 from lgta.feature_engineering.feature_transformations import detemporalize
 from lgta.transformations.apply_transformations_benchmark import (
@@ -27,15 +28,13 @@ def generate_synthetic_data(
     Returns:
     - X_hat: The synthetic dataset after transformation and processing.
     """
-    manipulate_data = ManipulateData(
-        z, transformation, [param * 100 for param in params]
-    )
+    manipulate_data = ManipulateData(z, transformation, [param for param in params])
 
     # Apply the specified transformation to the latent space representation
     z_modified = manipulate_data.apply_transf()
 
     # Generate predictions using the transformed latent representation
-    preds = model.decoder.predict([z_modified] + dynamic_feat + static_feat)
+    preds = model.decoder.predict([z_modified, tf.stack(dynamic_feat, axis=-1)])
     preds = detemporalize(preds, create_dataset_vae.window_size)
 
     # Inverse transform the predictions to get the synthetic dataset

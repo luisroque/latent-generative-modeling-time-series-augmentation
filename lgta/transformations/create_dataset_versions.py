@@ -44,7 +44,7 @@ class CreateTransformedVersions:
                 "n"
             ]  # number of points in each series for the training dataset
         else:
-            self.y = self.data["predict"]["data_matrix"]
+            self.y = self.data["predict"]["data"]
             self.n = self.data["predict"][
                 "n"
             ]  # number of points in each series for the whole dataset
@@ -73,20 +73,20 @@ class CreateTransformedVersions:
     def _create_directories(self):
         # Create directory to store transformed datasets if does not exist
         Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}assets/data/transformed_datasets").mkdir(
+        Path(f"{self.input_dir}data/transformed_datasets").mkdir(
             parents=True, exist_ok=True
         )
 
     def _save_original_file(self):
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
+            f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_original.npy",
             "wb",
         ) as f:
             np.save(f, self.y)
 
     def _save_version_file(self, y_new, version, sample, transformation, method):
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
+            f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
             "wb",
         ) as f:
             np.save(f, y_new)
@@ -126,7 +126,7 @@ class CreateTransformedVersions:
 
     def read_groups_transformed(self, method):
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
+            f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_original.npy",
             "rb",
         ) as f:
             self.y_loaded_original = np.load(f)
@@ -134,7 +134,7 @@ class CreateTransformedVersions:
         y_new = []
         for version in range(1, self.n_versions + 1):
             with open(
-                f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_10samples_single_transf_{method}_{self.transf_data}.npy",
+                f"{self.input_dir}data/transformed_datasets/{self.dataset_name}_version_{version}_10samples_single_transf_{method}_{self.transf_data}.npy",
                 "rb",
             ) as f_new:
                 y_ver = np.load(f_new)

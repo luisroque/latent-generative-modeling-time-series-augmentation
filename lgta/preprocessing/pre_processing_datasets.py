@@ -9,6 +9,7 @@ import numpy as np
 import datetime
 from datetime import timedelta
 from sklearn.preprocessing import MinMaxScaler
+from huggingface_hub import hf_hub_download
 
 
 class PreprocessDatasets:
@@ -49,8 +50,8 @@ class PreprocessDatasets:
         self,
         dataset: str,
         freq: str,
-        input_dir: str = "./",
-        top: int = None,
+        input_dir: str = "./assets/",
+        top: int = 500,
         test_size: int = None,
         sample_perc: float = None,
         weekly_m5: bool = True,
@@ -69,7 +70,6 @@ class PreprocessDatasets:
         self.num_base_series_time_points = num_base_series_time_points
         self.num_latent_dim = num_latent_dim
         self.num_variants = num_variants
-        self.api = "http://94.60.148.158:8086/apidownload/"
         self.top = top
         self.test_size = test_size
         self.sample_perc = sample_perc
@@ -84,23 +84,27 @@ class PreprocessDatasets:
         self._create_directories()
         self.n = {"prison": 48, "tourism": 228, "m5": 275, "police": 334}
 
-        self.pickle_path = (
-            f"{self.input_dir}assets/data/original_datasets/"
-            f"{self.dataset}_groups_{self.freq}_{self.sample_perc_int}_"
-            f"{self.test_size}_{self.top}.pickle"
-        )
-        pass
+        self.pickle_path = f"{self.input_dir}data/original_datasets/{self.dataset}.pkl/{self.dataset}.pkl"
+
+        self.dataset_mapping = {
+            "m5": "zaai-ai/hierarchical_time_series_datasets",
+            "police": "zaai-ai/hierarchical_time_series_datasets",
+            "prison": "zaai-ai/hierarchical_time_series_datasets",
+            "tourism": "zaai-ai/hierarchical_time_series_datasets",
+        }
+
+        self._get_dataset_path()
 
     def _create_directories(self):
         # Create directory to store original datasets if does not exist
         Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}assets/data/original_datasets").mkdir(
+        Path(f"{self.input_dir}data/original_datasets").mkdir(
             parents=True, exist_ok=True
         )
 
     @staticmethod
     def generate_time_series(length, num_series):
-        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaler = MinMaxScaler()
         series = [
             scaler.fit_transform(np.random.randn(length, 1)) for _ in range(num_series)
         ]
@@ -131,16 +135,27 @@ class PreprocessDatasets:
         offset = x[0].ceil(freq) - x[0] + datetime.timedelta(days=-1)
         return (x + offset).floor(freq) - offset
 
-    def _get_dataset_path(self, file_type="csv"):
-        path = (
-            f"{self.input_dir}assets/data/original_datasets/{self.dataset}.{file_type}"
+    def load_dataset_from_huggingface(self):
+        dataset_id = self.dataset_mapping.get(self.dataset.lower())
+        if not dataset_id:
+            raise ValueError(f"Dataset {self.dataset} is not supported.")
+        # Download the dataset file from Hugging Face Hub
+        save_path = f"{self.input_dir}data/original_datasets/{self.dataset.lower()}.pkl"
+        _ = hf_hub_download(
+            repo_id=dataset_id,
+            filename=f"{self.dataset.lower()}.pkl",
+            repo_type="dataset",
+            local_dir=save_path,
         )
-        if not os.path.isfile(path):
+        return save_path
+
+    def _get_dataset_path(self):
+        if not os.path.isfile(self.pickle_path):
             try:
-                request.urlretrieve(f"{self.api}{self.dataset}", path)
-            except request.URLError as e:
+                self.load_dataset_from_huggingface()
+            except Exception as e:
                 print(f"Failed to download the dataset. Error: {e}")
-        return path
+        return
 
     @staticmethod
     def _load_pickle_file(file_path):
@@ -264,38 +279,10 @@ class PreprocessDatasets:
         if data is not None:
             return data
 
-        path = self._get_dataset_path()
-        prison = self._load_and_preprocess_data(path, "t", ["Unnamed: 0"])
-        if prison is None:
-            return {}
-
-        prison["Date"] = pd.PeriodIndex(prison["Date"], freq="Q").to_timestamp()
-        prison_pivot = self._pivot_data(
-            prison, "Date", ["state", "gender", "legal"], "count"
-        )
-
-        groups_input = {"state": [0], "gender": [1], "legal": [2]}
-        groups = self._generate_groups(prison_pivot, groups_input, 4, 8)
-        return groups
-
     def _tourism(self):
         data = self._load_pickle_file(self.pickle_path)
         if data is not None:
             return data
-
-        path = self._get_dataset_path(file_type="csv")
-        tourism = self._load_and_preprocess_data(path, "Date")
-        if tourism is None:
-            return {}
-
-        tourism_pivot = self._pivot_data(
-            tourism, "Date", ["state", "zone", "region", "purpose"], "Count"
-        )
-        tourism_pivot = tourism_pivot.reindex(sorted(tourism_pivot.columns), axis=1)
-
-        groups_input = {"state": [0], "zone": [1], "region": [2], "purpose": [3]}
-        groups = self._generate_groups(tourism_pivot, groups_input, 12, 24)
-        return groups
 
     def _m5(self):
         """Preprocess the M5 dataset."""
@@ -303,115 +290,10 @@ class PreprocessDatasets:
         if data is not None:
             return data
 
-        path = self._get_dataset_path(file_type="zip")
-        if not path:
-            return {}
-
-        with zipfile.ZipFile(path, "r") as zip_ref:
-            zip_ref.extractall(f"{self.input_dir}assets/data/original_datasets/")
-
-        input_dir = f"{self.input_dir}assets/data/original_datasets/m5-data"
-        cal = pd.read_csv(f"{input_dir}/calendar.csv")
-        stv = pd.read_csv(f"{input_dir}/sales_train_validation.csv")
-
-        if self.test_size:
-            stv = stv[: self.test_size]
-
-        stv = self._transform_and_group_stv(stv)
-        df_caldays = self._generate_calendar_days(stv, cal)
-        stv = stv.merge(df_caldays, how="left", on="day")
-        stv["Date"] = stv["Date"].astype("datetime64[ns]")
-        stv = stv.set_index("Date")
-        cols = ["dept_id", "cat_id", "store_id", "state_id", "item_id"]
-
-        if self.weekly:
-            stv = self._convert_to_weekly_data(stv, cols)
-
-        stv = stv.reset_index()
-
-        if self.top:
-            stv = self._filter_top_series(stv, cols)
-
-        stv_pivot = self._pivot_data(
-            stv.reset_index(),
-            "Date",
-            cols,
-            "value",
-        )
-        stv_pivot = stv_pivot.fillna(0)
-
-        if self.weekly:
-            # Filter first and last week since they are not complete
-            min_date = stv_pivot.index.min() + pd.Timedelta(weeks=1)
-            max_date = stv_pivot.index.max() - pd.Timedelta(weeks=1)
-            stv_pivot_filtered = stv_pivot[
-                (stv_pivot.index >= min_date) & (stv_pivot.index <= max_date)
-            ]
-        else:
-            stv_pivot_filtered = stv_pivot
-
-        groups_input = {
-            "Department": [0],
-            "Category": [1],
-            "Store": [2],
-            "State": [3],
-            "Item": [4],
-        }
-
-        seasonality, h = (52, 12) if self.weekly else (365, 30)
-        groups = self._generate_groups(stv_pivot_filtered, groups_input, seasonality, h)
-        return groups
-
     def _police(self):
         data = self._load_pickle_file(self.pickle_path)
         if data is not None:
             return data
-
-        path = self._get_dataset_path(file_type="xlsx")
-        police = pd.read_excel(path)
-        cols = ["Crime", "Beat", "Street", "ZIP"]
-        cols_date = cols.copy()
-        cols_date.append("Date")
-
-        # Drop unwanted columns
-        police = police.drop(
-            [
-                "RMSOccurrenceHour",
-                "StreetName",
-                "Suffix",
-                "NIBRSDescription",
-                "Premise",
-            ],
-            axis=1,
-        )
-        police.columns = [
-            "Id",
-            "Date",
-            "Crime",
-            "Count",
-            "Beat",
-            "Block",
-            "Street",
-            "City",
-            "ZIP",
-        ]
-        police = police.drop(["Id"], axis=1)
-        police = police.astype({"ZIP": "string"})
-
-        police = self._filter_top_series(police, ["Crime", "Beat", "Street", "ZIP"])
-
-        police = self._fill_missing_dates(police, cols_date)
-
-        police_pivot = self._pivot_data(police.reset_index(), "Date", cols, "Count")
-        police_pivot = police_pivot.fillna(0)
-
-        if self.test_size:
-            police_pivot = police_pivot.iloc[:, : self.test_size]
-
-        groups_input = {"Crime": [0], "Beat": [1], "Street": [2], "ZIP": [3]}
-
-        groups = self._generate_groups(police_pivot, groups_input, 7, 30)
-        return groups
 
     def _synthetic(
         self,

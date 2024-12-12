@@ -190,7 +190,7 @@ def preprocess_data(data):
     Applies detrending and normalization to the original dataset.
     """
     # detrended_data = detrend(X_orig, axis=1)
-    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler = MinMaxScaler()
     normalized_data = scaler.fit_transform(data)
     return normalized_data
 

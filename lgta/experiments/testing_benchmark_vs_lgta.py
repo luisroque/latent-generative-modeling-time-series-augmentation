@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import tensorflow as tf
 from lgta.model.create_dataset_versions_vae import (
     CreateTransformedVersionsCVAE,
 )
@@ -7,6 +8,7 @@ from lgta.visualization.comparison_analysis import (
     plot_transformations_with_generate_datasets,
     plot_series_comparisons,
 )
+from lgta.visualization.model_visualization import plot_loss
 from lgta.model.generate_data import generate_datasets
 from lgta.evaluation.evaluation_comparison import (
     standardize_and_calculate_residuals,
@@ -37,19 +39,24 @@ top = None
 
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
-    dataset_name=dataset, freq=freq, top=top, dynamic_feat_trig=False
+    dataset_name=dataset, freq=freq, top=top, dynamic_feat_trig=True
 )
-model, _, _ = create_dataset_vae.fit()
-dynamic_feat, X_inp, static_feat = create_dataset_vae.features_input
+model, history, _ = create_dataset_vae.fit()
+plot_loss(history)
+(dynamic_feat, X_inp, static_feat), _ = create_dataset_vae._feature_engineering(
+    create_dataset_vae.n, val_steps=0
+)
+stacked_dynamic_feat = tf.stack(dynamic_feat, axis=-1)
+
 
 ######################
 # Visualize transformations
 ######################
 
-_, _, z = model.encoder.predict(dynamic_feat + X_inp + static_feat)
+_, _, z = model.encoder.predict([X_inp, stacked_dynamic_feat])
 z_modified = None
 
-preds = model.decoder.predict([z] + dynamic_feat + static_feat)
+preds = model.decoder.predict([z, stacked_dynamic_feat])
 
 preds = detemporalize(preds, create_dataset_vae.window_size)
 X_hat = create_dataset_vae.scaler_target.inverse_transform(preds)
@@ -69,7 +76,7 @@ plt.legend()
 transformations_plot = [
     {
         "transformation": "jitter",
-        "params": [1.5, 1.5, 1.5, 1.5],
+        "params": [2, 2, 2, 2],
         "parameters_benchmark": {
             "jitter": 0.5,
             "scaling": 0.1,
@@ -80,7 +87,7 @@ transformations_plot = [
     },
     {
         "transformation": "magnitude_warp",
-        "params": [0.7, 0.7, 0.7, 0.7],
+        "params": [2, 2, 2, 2],
         "parameters_benchmark": {
             "jitter": 0.5,
             "scaling": 0.1,
@@ -114,7 +121,7 @@ plot_transformations_with_generate_datasets(
 transformations = [
     {
         "transformation": "jitter",
-        "params": [0.875],
+        "params": [1.5],
         "parameters_benchmark": {
             "jitter": 0.375,
             "scaling": 0.1,
@@ -125,7 +132,7 @@ transformations = [
     },
     {
         "transformation": "scaling",
-        "params": [0.3],
+        "params": [1.3],
         "parameters_benchmark": {
             "jitter": 0.375,
             "scaling": 0.1,
@@ -136,7 +143,7 @@ transformations = [
     },
     {
         "transformation": "magnitude_warp",
-        "params": [0.45],
+        "params": [1.45],
         "parameters_benchmark": {
             "jitter": 0.375,
             "scaling": 0.1,
