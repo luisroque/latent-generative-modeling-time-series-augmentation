@@ -26,8 +26,6 @@ def e2e_transformation(
     freq,
     model,
     z,
-    dynamic_feat,
-    static_feat,
     create_dataset_vae,
     transformation,
     params,
@@ -54,8 +52,6 @@ def e2e_transformation(
         freq,
         model,
         z,
-        dynamic_feat,
-        static_feat,
         create_dataset_vae,
         X_orig,
         transformation,
@@ -67,7 +63,7 @@ def e2e_transformation(
     # Visualize comparison between transformations
     print("\n--- Transformation Comparisons ---")
     plot_transformations_comparison(transformed_datasets_benchmark, X_orig, series=0)
-    plot_series_comparisons(X_orig, X_hat_transf, X_benchmark)
+    plot_series_comparisons(X_orig, X_hat_transf, X_benchmark, transformation)
 
     # Compute and analyze distances
     print("\n--- Distance Analysis ---")
@@ -271,3 +267,198 @@ def summarize_and_plot_distributions(distances_lgta, distances_benchmark, title)
     plt.tight_layout()
     plt.show()
     plt.show()
+
+
+def plot_magnitude_comparisons(X_orig, X_hat_transf, X_benchmark, params, n_series=4):
+    """
+    Creates separate plots for each time series with subplots arranged by transformation parameters
+    (rows) and data type (columns: X_hat_transf and X_benchmark).
+    The y-axis range is defined independently for each row.
+    """
+    colors = {
+        "original": "black",
+        "l_gta": "darkorange",
+        "benchmark": "dodgerblue",
+    }
+
+    sns.set_style("whitegrid")
+    plt.rcParams.update(
+        {
+            "font.size": 10,
+            "axes.titlesize": 12,
+            "axes.labelsize": 10,
+            "legend.fontsize": 8,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+        }
+    )
+
+    for series_idx in range(n_series):
+        n_magnitudes = len(params)
+        fig, axes = plt.subplots(
+            n_magnitudes, 2, figsize=(12, 2.5 * n_magnitudes), sharex=True
+        )
+
+        fig.suptitle(
+            f"Comparing L-GTA vs Benchmark for Different Magnitudes for a Single Series",
+            fontsize=16,
+            fontweight="bold",
+        )
+
+        for i, param in enumerate(params):
+            # Calculate row-specific y-limits
+            y_min = min(
+                X_orig[:, series_idx].min(),
+                X_hat_transf[param][:, series_idx].min(),
+                X_benchmark[param][:, series_idx].min(),
+            )
+            y_max = max(
+                X_orig[:, series_idx].max(),
+                X_hat_transf[param][:, series_idx].max(),
+                X_benchmark[param][:, series_idx].max(),
+            )
+
+            # Plot X_hat_transf vs Original
+            axes[i, 0].plot(
+                X_orig[:, series_idx],
+                color=colors["original"],
+                label="Original",
+                linestyle="--",
+                linewidth=1.5,
+                alpha=0.5,
+            )
+            axes[i, 0].plot(
+                X_hat_transf[param][:, series_idx],
+                color=colors["l_gta"],
+                label="L-GTA",
+                linewidth=1.5,
+                alpha=0.75,
+            )
+            axes[i, 0].set_title(f"L-GTA @ {param}")
+            axes[i, 0].set_ylim(y_min, y_max)
+            if i == 0:
+                axes[i, 0].legend(loc="upper left", fontsize=8)
+            if i == n_magnitudes - 1:
+                axes[i, 0].set_xlabel("Time")
+            axes[i, 0].set_ylabel("Value")
+
+            # Plot X_benchmark vs Original
+            axes[i, 1].plot(
+                X_orig[:, series_idx],
+                color=colors["original"],
+                label="Original",
+                linestyle="--",
+                linewidth=1.5,
+                alpha=0.5,
+            )
+            axes[i, 1].plot(
+                X_benchmark[param][:, series_idx],
+                color=colors["benchmark"],
+                label="Benchmark",
+                linewidth=1.5,
+                alpha=0.55,
+            )
+            axes[i, 1].set_title(f"Benchmark @ {param}")
+            axes[i, 1].set_ylim(y_min, y_max)
+            if i == 0:
+                axes[i, 1].legend(loc="upper left", fontsize=8)
+            if i == n_magnitudes - 1:
+                axes[i, 1].set_xlabel("Time")
+
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.show()
+
+
+def compare_diff_magnitudes(
+    dataset,
+    freq,
+    model,
+    z,
+    create_dataset_vae,
+    X_orig,
+    n_series=8,
+):
+    transformations = [
+        {
+            "transformation": "magnitude_warp",
+            "params": [0.1],
+            "parameters_benchmark": {
+                "jitter": 0.5,
+                "scaling": 0.1,
+                "magnitude_warp": 0.1,
+                "time_warp": 0.05,
+            },
+            "version": 4,
+        },
+        {
+            "transformation": "magnitude_warp",
+            "params": [0.15],
+            "parameters_benchmark": {
+                "jitter": 0.7,
+                "scaling": 0.1,
+                "magnitude_warp": 0.15,
+                "time_warp": 0.05,
+            },
+            "version": 4,
+        },
+        {
+            "transformation": "magnitude_warp",
+            "params": [0.2],
+            "parameters_benchmark": {
+                "jitter": 0.9,
+                "scaling": 0.1,
+                "magnitude_warp": 0.2,
+                "time_warp": 0.05,
+            },
+            "version": 4,
+        },
+        {
+            "transformation": "magnitude_warp",
+            "params": [0.25],
+            "parameters_benchmark": {
+                "jitter": 1.2,
+                "scaling": 0.1,
+                "magnitude_warp": 0.25,
+                "time_warp": 0.05,
+            },
+            "version": 4,
+        },
+        {
+            "transformation": "magnitude_warp",
+            "params": [0.3],
+            "parameters_benchmark": {
+                "jitter": 1.5,
+                "scaling": 0.1,
+                "magnitude_warp": 0.3,
+                "time_warp": 0.05,
+            },
+            "version": 4,
+        },
+    ]
+    X_hat_transf_all = {}
+    X_benchmark_all = {}
+
+    for transformation in transformations:
+        X_orig, X_hat_transf, X_benchmark = generate_datasets(
+            dataset,
+            freq,
+            model,
+            z,
+            create_dataset_vae,
+            X_orig,
+            transformation["transformation"],
+            transformation["params"],
+            transformation["parameters_benchmark"],
+            transformation["version"],
+        )
+
+        X_hat_transf_all[transformation["params"][0]] = X_hat_transf
+        X_benchmark_all[transformation["params"][0]] = X_benchmark
+
+    plot_magnitude_comparisons(
+        X_orig,
+        X_hat_transf_all,
+        X_benchmark_all,
+        [t["params"][0] for t in transformations],
+        n_series,
+    )

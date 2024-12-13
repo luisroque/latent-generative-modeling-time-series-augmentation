@@ -11,7 +11,6 @@ def generate_new_time_series(
     z_log_var: np.ndarray,
     window_size: int,
     dynamic_features_inp: List[np.ndarray],
-    static_features_inp: List[np.ndarray],
     scaler_target: object,
     n_features: int,
     n: int,
@@ -31,7 +30,6 @@ def generate_new_time_series(
         z_log_var (np.ndarray): Logarithm of the variance of the latent space Gaussian distribution for each series.
         window_size (int): Size of the rolling window used in the series generation.
         dynamic_features_inp (List[np.ndarray]): List of dynamic features to be inputted to the model.
-        static_features_inp (List[np.ndarray]): List of static features to be inputted to the model.
         scaler_target (object): A scaler object, trained on the training data, used for inverse transformations.
         n_features (int): Number of input features.
         n (int): Number of time points in the series to be generated.
@@ -61,10 +59,7 @@ def generate_new_time_series(
         z_sample = np.random.normal(z_mean[id_seq], z_std[id_seq], size=(latent_dim,))
 
         d_feat = [dy[id_seq, :].reshape(1, window_size) for dy in dynamic_features_inp]
-        s_feat = [st[id_seq, :].reshape(1, n_features, 1) for st in static_features_inp]
-        dec_pred.append(
-            cvae.decoder.predict([z_sample.reshape(1, latent_dim)] + d_feat + s_feat)
-        )
+        dec_pred.append(cvae.decoder.predict([z_sample.reshape(1, latent_dim), d_feat]))
 
     dec_pred_hat = detemporalize(np.squeeze(np.array(dec_pred)), window_size)
     dec_pred_hat = scaler_target.inverse_transform(dec_pred_hat)

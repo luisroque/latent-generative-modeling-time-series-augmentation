@@ -511,3 +511,47 @@ def compare_residuals_variances_pca(
         print(
             "No significant differences in variances were found across principal components."
         )
+
+
+def plot_residuals_gradient(residuals_lgta, residuals_benchmark, params):
+    """
+    Plots the KDE of residuals for L-GTA and Benchmark for different magnitudes.
+    """
+    flat_residuals_lgta = [residuals_lgta[i].flatten() for i in range(len(params))]
+    flat_residuals_benchmark = [
+        residuals_benchmark[i].flatten() for i in range(len(params))
+    ]
+
+    lgta_colors = sns.light_palette("darkorange", n_colors=len(params))
+    benchmark_colors = sns.light_palette("dodgerblue", n_colors=len(params))
+
+    plt.figure(figsize=(10, 6))
+
+    # Plot KDEs for L-GTA
+    for i, param in enumerate(params):
+        sns.kdeplot(
+            flat_residuals_lgta[i],
+            label=f"L-GTA -> {param}",
+            color=lgta_colors[i],
+            linewidth=2,
+        )
+
+    # Plot KDEs for Benchmark
+    for i, param in enumerate(params):
+        sns.kdeplot(
+            flat_residuals_benchmark[i],
+            label=f"Benchmark -> {param}",
+            color=benchmark_colors[i],
+            linewidth=2,
+        )
+
+    plt.xlim(-3, 3)
+    plt.title(
+        "KDE of Residuals for the Jittering Transformation for Different Magnitudes",
+        fontsize=14,
+    )
+    plt.xlabel("Residuals", fontsize=12)
+    plt.ylabel("Density", fontsize=12)
+    plt.legend(fontsize=10)
+    plt.tight_layout()
+    plt.show()

@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 from lgta.model.create_dataset_versions_vae import (
     CreateTransformedVersionsCVAE,
 )
@@ -6,11 +7,13 @@ from lgta.feature_engineering.feature_transformations import detemporalize
 from lgta.visualization.comparison_analysis import (
     plot_transformations_with_generate_datasets,
     plot_series_comparisons,
+    plot_single_time_series,
 )
 from lgta.model.generate_data import generate_datasets
 from lgta.evaluation.evaluation_comparison import (
     standardize_and_calculate_residuals,
     analyze_transformations,
+    plot_residuals_gradient,
 )
 from lgta.postprocessing.postprocessing_comparison import (
     process_transformations,
@@ -18,7 +21,7 @@ from lgta.postprocessing.postprocessing_comparison import (
     create_distance_metrics_dataset,
     create_reconstruction_error_percentage_dataset,
 )
-from lgta.e2e.e2e_processing import e2e_transformation
+from lgta.e2e.e2e_processing import e2e_transformation, compare_diff_magnitudes
 
 
 dataset = "tourism"
@@ -40,19 +43,11 @@ create_dataset_vae = CreateTransformedVersionsCVAE(
     dataset_name=dataset, freq=freq, top=top, dynamic_feat_trig=False
 )
 model, _, _ = create_dataset_vae.fit()
-dynamic_feat, X_inp, static_feat = create_dataset_vae.features_input
+X_hat, z, _, _ = create_dataset_vae.predict(model)
 
 ######################
 # Visualize transformations
 ######################
-
-_, _, z = model.encoder.predict(dynamic_feat + X_inp + static_feat)
-z_modified = None
-
-preds = model.decoder.predict([z] + dynamic_feat + static_feat)
-
-preds = detemporalize(preds, create_dataset_vae.window_size)
-X_hat = create_dataset_vae.scaler_target.inverse_transform(preds)
 
 X_orig = create_dataset_vae.X_train_raw
 X_hat_orig = X_hat
@@ -69,7 +64,7 @@ plt.legend()
 transformations_plot = [
     {
         "transformation": "jitter",
-        "params": [1.5, 1.5, 1.5, 1.5],
+        "params": [0.5, 0.5, 0.5, 0.5],
         "parameters_benchmark": {
             "jitter": 0.5,
             "scaling": 0.1,
@@ -80,7 +75,7 @@ transformations_plot = [
     },
     {
         "transformation": "magnitude_warp",
-        "params": [0.7, 0.7, 0.7, 0.7],
+        "params": [0.1, 0.1, 0.1, 0.1],
         "parameters_benchmark": {
             "jitter": 0.5,
             "scaling": 0.1,
@@ -92,17 +87,40 @@ transformations_plot = [
 ]
 
 plot_transformations_with_generate_datasets(
+    dataset=dataset,
+    freq=freq,
+    generate_datasets=generate_datasets,
+    X_orig=X_orig,
+    model=model,
+    z=z,
+    create_dataset_vae=create_dataset_vae,
+    transformations=transformations_plot,
+    num_series=4,
+)
+
+plot_single_time_series(
+    dataset=dataset,
+    freq=freq,
+    generate_datasets=generate_datasets,
+    X_orig=X_orig,
+    model=model,
+    z=z,
+    create_dataset_vae=create_dataset_vae,
+    transformations=transformations_plot,
+    num_series=4,
+)
+
+######################
+# magnitude comparison
+######################
+
+compare_diff_magnitudes(
     dataset,
     freq,
-    generate_datasets,
-    X_orig,
     model,
     z,
-    dynamic_feat,
-    static_feat,
     create_dataset_vae,
-    transformations_plot,
-    4,
+    X_orig,
 )
 
 
@@ -114,9 +132,9 @@ plot_transformations_with_generate_datasets(
 transformations = [
     {
         "transformation": "jitter",
-        "params": [0.875],
+        "params": [0.5],
         "parameters_benchmark": {
-            "jitter": 0.375,
+            "jitter": 0.5,
             "scaling": 0.1,
             "magnitude_warp": 0.1,
             "time_warp": 0.05,
@@ -125,7 +143,7 @@ transformations = [
     },
     {
         "transformation": "scaling",
-        "params": [0.3],
+        "params": [0.25],
         "parameters_benchmark": {
             "jitter": 0.375,
             "scaling": 0.1,
@@ -136,7 +154,7 @@ transformations = [
     },
     {
         "transformation": "magnitude_warp",
-        "params": [0.45],
+        "params": [0.1],
         "parameters_benchmark": {
             "jitter": 0.375,
             "scaling": 0.1,
@@ -154,8 +172,6 @@ for transformation in transformations:
         freq,
         model,
         z,
-        dynamic_feat,
-        static_feat,
         create_dataset_vae,
         transformation["transformation"],
         transformation["params"],
@@ -185,7 +201,7 @@ create_prediction_comparison_dataset(res_processed)
 
 
 transformation = "jitter"
-params = [1.5]
+params = [0.5]
 
 parameters_benchmark = {
     "jitter": 0.5,
@@ -201,8 +217,6 @@ X_orig, X_lgta, X_benchmark = generate_datasets(
     freq,
     model,
     z,
-    dynamic_feat,
-    static_feat,
     create_dataset_vae,
     X_orig,
     transformation,
@@ -213,5 +227,71 @@ X_orig, X_lgta, X_benchmark = generate_datasets(
 residuals_lgta, residuals_benchmark = standardize_and_calculate_residuals(
     X_orig, X_lgta, X_benchmark
 )
-plot_series_comparisons(X_orig, X_lgta, X_benchmark)
+plot_series_comparisons(X_orig, X_lgta, X_benchmark, "jittering")
 analyze_transformations(residuals_lgta, residuals_benchmark)
+
+######################
+# Residuals for diff magnitudes
+######################
+
+transformation = "jitter"
+params = [0.5, 0.6, 0.7, 0.8, 0.9]
+
+parameters_benchmark = [
+    {
+        "jitter": 0.5,
+        "scaling": 0.1,
+        "magnitude_warp": 0.1,
+        "time_warp": 0.05,
+    },
+    {
+        "jitter": 0.6,
+        "scaling": 0.1,
+        "magnitude_warp": 0.1,
+        "time_warp": 0.05,
+    },
+    {
+        "jitter": 0.7,
+        "scaling": 0.1,
+        "magnitude_warp": 0.1,
+        "time_warp": 0.05,
+    },
+    {
+        "jitter": 0.8,
+        "scaling": 0.1,
+        "magnitude_warp": 0.1,
+        "time_warp": 0.05,
+    },
+    {
+        "jitter": 0.9,
+        "scaling": 0.1,
+        "magnitude_warp": 0.1,
+        "time_warp": 0.05,
+    },
+]
+
+version = 5
+
+residuals_lgta_all = []
+residuals_benchmark_all = []
+
+for i, param in enumerate(params):
+    X_orig, X_lgta, X_benchmark = generate_datasets(
+        dataset,
+        freq,
+        model,
+        z,
+        create_dataset_vae,
+        X_orig,
+        transformation,
+        [param],
+        parameters_benchmark[i],
+        version,
+    )
+    residuals_lgta, residuals_benchmark = standardize_and_calculate_residuals(
+        X_orig, X_lgta, X_benchmark
+    )
+    residuals_lgta_all.append(residuals_lgta)
+    residuals_benchmark_all.append(residuals_benchmark)
+
+plot_residuals_gradient(residuals_lgta_all, residuals_benchmark_all, params)

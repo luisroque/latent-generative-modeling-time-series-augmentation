@@ -1,3 +1,4 @@
+import numpy as np
 from lgta.transformations import ManipulateData
 from lgta.feature_engineering.feature_transformations import detemporalize
 from lgta.transformations.apply_transformations_benchmark import (
@@ -6,39 +7,27 @@ from lgta.transformations.apply_transformations_benchmark import (
 from lgta.utils.helper import reshape_datasets, clip_datasets
 
 
-def generate_synthetic_data(
-    model, z, dynamic_feat, static_feat, create_dataset_vae, transformation, params
-):
+def generate_synthetic_data(model, z, create_dataset_vae, transformation, params):
     """
     Generates synthetic data by applying a transformation to the latent space representation,
-    then using the model's decoder to generate predictions. Optionally plots comparisons between
-    original and transformed series.
-
-    Parameters:
-    - model: The trained model with an encoder and decoder.
-    - z: Latent space representation to transform.
-    - dynamic_feat: Dynamic features required by the model for prediction.
-    - static_feat: Static features required by the model for prediction.
-    - create_dataset_vae: An object containing utilities for scaling and inverse scaling of data.
-    - transformation: String specifying the transformation to apply ('jitter', 'scaling', 'magnitude_warp', 'time_warp').
-    - params: Parameters for the transformation.
-    - plot_series: Boolean, if True, plots comparisons between original and synthetic series.
-
-    Returns:
-    - X_hat: The synthetic dataset after transformation and processing.
+    then using the model's decoder to generate predictions.
     """
-    manipulate_data = ManipulateData(
-        z, transformation, [param * 100 for param in params]
-    )
+    all_preds = []
 
-    # Apply the specified transformation to the latent space representation
-    z_modified = manipulate_data.apply_transf()
+    for dynamic_feat, X_inp in create_dataset_vae.input_data:
+        # apply the specified transformation to the latent space representation
+        manipulate_data = ManipulateData(
+            z, transformation, [param * 100 for param in params]
+        )
+        z_modified = manipulate_data.apply_transf()
 
-    # Generate predictions using the transformed latent representation
-    preds = model.decoder.predict([z_modified] + dynamic_feat + static_feat)
-    preds = detemporalize(preds, create_dataset_vae.window_size)
+        # generate predictions using the transformed latent representation
+        preds = model.decoder.predict([z_modified, dynamic_feat])
+        all_preds.append(preds)
 
-    # Inverse transform the predictions to get the synthetic dataset
+    all_preds = np.concatenate(all_preds, axis=0)
+
+    preds = detemporalize(all_preds, create_dataset_vae.window_size)
     X_hat = create_dataset_vae.scaler_target.inverse_transform(preds)
 
     return X_hat
@@ -49,8 +38,6 @@ def generate_datasets(
     freq,
     model,
     z,
-    dynamic_feat,
-    static_feat,
     create_dataset_vae,
     X_orig,
     transformation,
@@ -58,15 +45,15 @@ def generate_datasets(
     parameters_benchmark,
     version,
 ):
-    # Apply transformations and generate synthetic data
+    # apply transformations and generate synthetic data
     X_hat = generate_synthetic_data(
-        model, z, dynamic_feat, static_feat, create_dataset_vae, transformation, params
+        model, z, create_dataset_vae, transformation, params
     )
     transformed_datasets_benchmark = apply_transformations_and_standardize(
         dataset, freq, parameters_benchmark, standardize=False
     )
 
-    # Reshape and clip datasets
+    # reshape and clip datasets
     X_orig, X_hat_transf, X_benchmark = reshape_datasets(
         X_orig,
         X_hat,
