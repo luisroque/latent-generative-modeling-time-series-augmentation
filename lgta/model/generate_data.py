@@ -9,19 +9,19 @@ from lgta.utils.helper import reshape_datasets, clip_datasets
 
 def generate_synthetic_data(model, z, create_dataset_vae, transformation, params):
     """
-    Generates synthetic data by applying a transformation to the latent space representation,
-    then using the model's decoder to generate predictions.
+    Generates synthetic data by applying a transformation to the latent space
+    representation v' = T(v, eta), then decoding through the CVAE decoder.
+
+    z has shape (n_windows, window_size, latent_dim) for per-timestep latent variables.
     """
     all_preds = []
 
     for dynamic_feat, X_inp in create_dataset_vae.input_data:
-        # apply the specified transformation to the latent space representation
-        manipulate_data = ManipulateData(
-            z, transformation, [param * 100 for param in params]
-        )
-        z_modified = manipulate_data.apply_transf()
+        original_shape = z.shape
+        z_2d = z.reshape(z.shape[0], -1)
+        manipulate_data = ManipulateData(z_2d, transformation, list(params))
+        z_modified = manipulate_data.apply_transf().reshape(original_shape)
 
-        # generate predictions using the transformed latent representation
         preds = model.decoder.predict([z_modified, dynamic_feat])
         all_preds.append(preds)
 

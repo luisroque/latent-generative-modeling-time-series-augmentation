@@ -56,7 +56,7 @@ def perform_dimensionality_reduction(X_orig, X_synth, n_components=2):
     X_synth_norm = scaler.transform(X_synth)
 
     pca = PCA(n_components=n_components)
-    tsne = TSNE(n_components=n_components, n_iter=300)
+    tsne = TSNE(n_components=n_components)
 
     # Fit PCA on the original data and transform both datasets
     pca_real = pd.DataFrame(

@@ -33,7 +33,6 @@ class PreprocessDatasetsTestCase(unittest.TestCase):
         create_dataset_cvae = CreateTransformedVersionsCVAE(
             dataset_name=self.dataset,
             freq=self.freq,
-            dynamic_feat_trig=False,
         )
 
         model, _, _ = create_dataset_cvae.fit(latent_dim=3)

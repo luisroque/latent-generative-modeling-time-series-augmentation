@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, Union
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow import keras
 import tensorflow as tf
@@ -33,6 +33,26 @@ class InvalidFrequencyError(Exception):
     pass
 
 
+def _normalize_transformations(
+    transformation: Optional[Union[str, list[str]]],
+    transf_param: Union[float, list[float]],
+) -> tuple[Optional[list[str]], Optional[list[float]]]:
+    """Convert single transformation/param to lists for uniform chaining logic."""
+    if transformation is None:
+        return None, None
+    if isinstance(transformation, str):
+        transformations = [transformation]
+        transf_params = (
+            [transf_param] if isinstance(transf_param, (int, float)) else transf_param
+        )
+    else:
+        transformations = transformation
+        transf_params = (
+            transf_param if isinstance(transf_param, list) else [transf_param]
+        )
+    return transformations, transf_params
+
+
 class CreateTransformedVersionsCVAE:
     """
     Class for creating transformed versions of the dataset using a Conditional Variational Autoencoder (CVAE).
@@ -51,8 +71,6 @@ class CreateTransformedVersionsCVAE:
         window_size: Window size for the sliding window. Defaults to 10.
         weekly_m5: If True, use the M5 competition's weekly grouping. Defaults to True.
         test_size: Size of the test set. If None, the size is determined automatically. Defaults to None.
-        dynamic_feat_trig: If True, apply dynamic feature transformation. Defaults to True.
-
         Below are parameters for the synthetic data creation:
             num_base_series_time_points: Number of base time points in the series. Defaults to 100.
             num_latent_dim: Dimension of the latent space. Defaults to 3.
@@ -81,7 +99,6 @@ class CreateTransformedVersionsCVAE:
         window_size: int = 10,
         weekly_m5: bool = True,
         test_size: int = None,
-        dynamic_feat_trig: bool = True,
         num_base_series_time_points: int = 100,
         num_latent_dim: int = 3,
         num_variants: int = 20,
@@ -94,7 +111,6 @@ class CreateTransformedVersionsCVAE:
         self.freq = freq
         self.top = top
         self.test_size = test_size
-        self.dynamic_feat_trig = dynamic_feat_trig
         self.weekly_m5 = weekly_m5
         self.num_base_series_time_points = num_base_series_time_points
         self.num_latent_dim = num_latent_dim
@@ -119,8 +135,6 @@ class CreateTransformedVersionsCVAE:
         self.df.asfreq(self.freq)
         self.preprocess_freq()
         self.input_data = None
-
-        self.features_input = (None, None, None)
         self._create_directories()
         self._save_original_file()
 
@@ -184,6 +198,8 @@ class CreateTransformedVersionsCVAE:
         Path(f"{self.input_dir}assets/data/transformed_datasets").mkdir(
             parents=True, exist_ok=True
         )
+        # Create directory to store model weights if does not exist
+        Path(f"{self.input_dir}assets/model_weights").mkdir(parents=True, exist_ok=True)
 
     def _save_original_file(self):
         """
@@ -307,7 +323,7 @@ class CreateTransformedVersionsCVAE:
             restore_best_weights=True,
         )
 
-        weights_folder = "model_weights"
+        weights_folder = f"{self.input_dir}assets/model_weights"
         os.makedirs(weights_folder, exist_ok=True)
 
         weights_file = os.path.join(
@@ -389,40 +405,46 @@ class CreateTransformedVersionsCVAE:
         cvae: CVAE,
         z_mean: np.ndarray,
         z_log_var: np.ndarray,
-        transformation: Optional[str] = None,
-        transf_param: float = 0.5,
+        transformation: Optional[Union[str, list[str]]] = None,
+        transf_param: Union[float, list[float]] = 0.5,
         plot_predictions: bool = True,
         n_series_plot: int = 8,
     ) -> np.ndarray:
         """
-        Generate new time series by sampling from the latent space of a Conditional Variational Autoencoder (CVAE).
+        Generate new time series by sampling from the CVAE latent space.
+
+        Supports sequential chaining of transformations on latent samples:
+        v' = T_n(...T_2(T_1(v, eta_1), eta_2)..., eta_n)
 
         Args:
-            cvae: A trained Conditional Variational Autoencoder (CVAE) model.
-            z_mean: Mean parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            z_log_var: Log variance parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            transformation: Transformation to apply to the data, if any.
-            transf_param: Parameter for the transformation.
-            plot_predictions: If True, plots examples of generated series versus original and stores in a PDF.
+            cvae: A trained CVAE model.
+            z_mean: Per-timestep latent means, shape (n_windows, window_size, latent_dim).
+            z_log_var: Per-timestep latent log-variances, same shape.
+            transformation: Single transformation name or list for chaining.
+            transf_param: Single parameter or list matching transformations.
+            plot_predictions: If True, plots generated vs original series.
             n_series_plot: Number of series to plot.
 
         Returns:
-            A new generated dataset (time series).
+            Generated time series of shape (n, n_features).
         """
-        self.features_input = self._feature_engineering(self.n)
-        dynamic_feat, X_inp = self.features_input
+        self._feature_engineering(self.n)
+
+        transformations, transf_params = _normalize_transformations(
+            transformation, transf_param
+        )
 
         dec_pred_hat = generate_new_time_series(
             cvae=cvae,
             z_mean=z_mean,
             z_log_var=z_log_var,
             window_size=self.window_size,
-            dynamic_features_inp=dynamic_feat,
+            dynamic_features_inp=self.dynamic_features_inp[0],
             scaler_target=self.scaler_target,
             n_features=self.n_features,
             n=self.n,
-            transformation=transformation,
-            transf_param=transf_param,
+            transformations=transformations,
+            transf_params=transf_params,
         )
 
         if plot_predictions:
@@ -443,26 +465,26 @@ class CreateTransformedVersionsCVAE:
         z_mean: np.ndarray,
         z_log_var: np.ndarray,
         transformation: Optional[str] = None,
-        transf_param: List[float] = None,
+        transf_param: list[float] = None,
         n_versions: int = 6,
         n_samples: int = 10,
         save: bool = True,
     ) -> np.ndarray:
         """
-        Generate new datasets using the CVAE trained model and different samples from its latent space.
+        Generate multiple dataset versions using different transformation magnitudes.
 
         Args:
-            cvae: A trained Conditional Variational Autoencoder (CVAE) model.
-            z_mean: Mean parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            z_log_var: Log variance parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            transformation: Transformation to apply to the data, if any.
-            transf_param: Parameter for the transformation.
+            cvae: A trained CVAE model.
+            z_mean: Per-timestep latent means, shape (n_windows, window_size, latent_dim).
+            z_log_var: Per-timestep latent log-variances, same shape.
+            transformation: Single transformation name to apply.
+            transf_param: List of parameters, one per version.
             n_versions: Number of versions of the dataset to create.
-            n_samples: Number of samples of the dataset to create.
+            n_samples: Number of samples per version.
             save: If True, the generated datasets are stored locally.
 
         Returns:
-            An array containing the new generated datasets.
+            Array of shape (n_versions, n_samples, n_timepoints, n_features).
         """
         if transf_param is None:
             transf_param = [0.5, 2, 4, 10, 20, 50]

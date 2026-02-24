@@ -1,38 +1,52 @@
+"""
+Time series augmentation transformations applied to raw data or latent space
+representations. Each transformation is parameterized by a sigma value controlling
+the magnitude of the perturbation.
+"""
+
 from scipy.interpolate import CubicSpline
 import numpy as np
 
 
+TransformationName = str
+
+TRANSFORMATION_REGISTRY: dict[TransformationName, str] = {
+    "jitter": "_jitter",
+    "scaling": "_scaling",
+    "magnitude_warp": "_magnitude_warp",
+    "time_warp": "_time_warp",
+}
+
+
 class ManipulateData:
-    def __init__(self, x, transformation, parameters):
+    def __init__(
+        self,
+        x: np.ndarray,
+        transformation: TransformationName,
+        parameters: list[float],
+    ):
         self.x = np.array(x)
         self.transformation = transformation
         self.orig_steps = np.arange(self.x.shape[0])
-        self.sigma = self.extend_list(parameters, 4)
+        self.sigma = parameters[0] if parameters else 0.0
 
-    @staticmethod
-    def extend_list(lst, size):
-        if len(lst) < size:
-            last_element = lst[-1]
-            lst.extend([last_element] * (size - len(lst)))
-        return lst
-
-    def _jitter(self):
-        computed_sigma = np.std(self.x, axis=0) / 4 * self.sigma[0]
+    def _jitter(self) -> np.ndarray:
+        computed_sigma = np.std(self.x, axis=0) / 4 * self.sigma
         threshold = 0.1
-        sigma = np.where(computed_sigma < threshold, self.sigma[0], computed_sigma)
+        sigma = np.where(computed_sigma < threshold, self.sigma, computed_sigma)
         return self.x + np.random.normal(
             loc=0.0, scale=sigma, size=(self.x.shape[0], self.x.shape[1])
         )
 
-    def _scaling(self):
+    def _scaling(self) -> np.ndarray:
         factor = np.random.normal(
-            loc=1.0, scale=self.sigma[1], size=(self.x.shape[0], self.x.shape[1])
+            loc=1.0, scale=self.sigma, size=(self.x.shape[0], self.x.shape[1])
         )
-        return np.squeeze(self.x) * factor
+        return self.x * factor
 
-    def _magnitude_warp(self, knot=4):
+    def _magnitude_warp(self, knot: int = 4) -> np.ndarray:
         random_warps = np.random.normal(
-            loc=1.0, scale=self.sigma[2], size=(knot + 2, self.x.shape[1])
+            loc=1.0, scale=self.sigma, size=(knot + 2, self.x.shape[1])
         )
         warp_steps = np.linspace(0, self.x.shape[0] - 1.0, num=knot + 2)
         warper = np.zeros((self.x.shape[0], self.x.shape[1]))
@@ -41,12 +55,11 @@ class ManipulateData:
             warper[:, i] = np.array(
                 [CubicSpline(warp_steps, random_warps[:, i])(self.orig_steps)]
             )
-        ret = self.x * warper
-        return ret
+        return self.x * warper
 
-    def _time_warp(self, knot=4):
+    def _time_warp(self, knot: int = 4) -> np.ndarray:
         random_warps = np.random.normal(
-            loc=1.0, scale=self.sigma[3], size=(knot + 2, self.x.shape[1])
+            loc=1.0, scale=self.sigma, size=(knot + 2, self.x.shape[1])
         )
         warp_steps = np.linspace(0, self.x.shape[0] - 1.0, num=knot + 2)
         time_warp = np.zeros((self.x.shape[0], self.x.shape[1]))
@@ -59,6 +72,11 @@ class ManipulateData:
             ret[:, i] = np.interp(self.orig_steps, time_warp[:, i], self.x[:, i])
         return ret
 
-    def apply_transf(self):
-        x_new = getattr(ManipulateData, "_" + self.transformation)(self)
-        return x_new
+    def apply_transf(self) -> np.ndarray:
+        method_name = TRANSFORMATION_REGISTRY.get(self.transformation)
+        if method_name is None:
+            raise ValueError(
+                f"Unknown transformation '{self.transformation}'. "
+                f"Valid options: {list(TRANSFORMATION_REGISTRY.keys())}"
+            )
+        return getattr(self, method_name)()

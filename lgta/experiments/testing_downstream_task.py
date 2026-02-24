@@ -42,7 +42,7 @@ transformations = [
 ]
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
-    dataset_name=dataset, freq=freq, top=top, dynamic_feat_trig=False
+    dataset_name=dataset, freq=freq, top=top
 )
 
 model, _, _ = create_dataset_vae.fit()
