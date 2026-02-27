@@ -24,23 +24,12 @@ from lgta.postprocessing.postprocessing_comparison import (
 from lgta.e2e.e2e_processing import e2e_transformation, compare_diff_magnitudes
 
 
-dataset = "tourism"
-freq = "M"
-top = None
-
-# For M5 dataset
-# dataset = "m5"
-# freq = "W"
-# top = 500
-
-# For police dataset
-# dataset = "police"
-# freq = "D"
-# top = 500
+dataset = "tourism_small"
+freq = "Q"
 
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
-    dataset_name=dataset, freq=freq, top=top
+    dataset_name=dataset, freq=freq
 )
 model, _, _ = create_dataset_vae.fit()
 X_hat, z, _, _ = create_dataset_vae.predict(model)

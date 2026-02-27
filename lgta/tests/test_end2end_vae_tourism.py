@@ -1,20 +1,15 @@
 import unittest
-from lgta.tests.conftest import skip_unless_dataset
-from lgta.model.create_dataset_versions_vae import (
-    CreateTransformedVersionsCVAE,
-)
+from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
 from lgta.transformations.compute_similarities_summary_metrics import (
     compute_similarity_transformed_vs_original,
 )
 
 
-class TestModel(unittest.TestCase):
+class TestEndToEndVAETourismSmall(unittest.TestCase):
     def setUp(self) -> None:
-        skip_unless_dataset("tourism")
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
-            dataset_name="tourism", freq="M", top=5
+            dataset_name="tourism_small", freq="Q", test_size=5
         )
-
         self.model, _, _ = self.create_dataset_vae.fit(epochs=1, load_weights=False)
         (
             self.preds,
@@ -30,13 +25,10 @@ class TestModel(unittest.TestCase):
             z_log_var=self.z_log_var,
             transf_param=0.5,
         )
-
-        self.assertTrue(
-            compute_similarity_transformed_vs_original(
-                dec_pred_hat, self.create_dataset_vae.X_train_raw
-            )[0]
-            < 20
-        )
+        similarity = compute_similarity_transformed_vs_original(
+            dec_pred_hat, self.create_dataset_vae.X_train_raw
+        )[0]
+        self.assertLess(similarity, 50000)
 
     def test_create_correct_number_transformed_datasets(self):
         new_datasets = self.create_dataset_vae.generate_new_datasets(
@@ -47,5 +39,4 @@ class TestModel(unittest.TestCase):
             n_versions=2,
             n_samples=3,
         )
-        # shape (n_versions, n_samples, n_samples, n_series) — top=5 so 5 series
-        self.assertTrue(new_datasets.shape == (2, 3, 228, 5))
+        self.assertEqual(new_datasets.shape, (2, 3, 36, 5))

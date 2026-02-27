@@ -47,15 +47,13 @@ def quick_evaluation_example():
     print("\nRunning evaluation for each transformation with n_repetitions=3")
     print("Model and benchmark use the same param per transformation.\n")
 
-    dataset = "tourism"
-    freq = "M"
-    top = None
+    dataset = "tourism_small"
+    freq = "Q"
     base_output = Path("assets/results/quick_example")
 
-    # Step 1: Train VAE once
     print("[1/2] Training VAE model...")
     create_dataset_vae = CreateTransformedVersionsCVAE(
-        dataset_name=dataset, freq=freq, top=top
+        dataset_name=dataset, freq=freq
     )
     model, _, _ = create_dataset_vae.fit()
     X_hat, z, _, _ = create_dataset_vae.predict(model)

@@ -15,12 +15,12 @@ from lgta.feature_engineering.feature_transformations import (
 from sklearn.preprocessing import MinMaxScaler
 
 
-class TestModel(unittest.TestCase):
+class TestFeatureEngineering(unittest.TestCase):
     def setUp(self) -> None:
         self.window_size = 10
         self.latent_dim = 2
         self.dataset = tsag.preprocessing.PreprocessDatasets(
-            "tourism", freq="M"
+            "tourism_small", freq="Q"
         ).apply_preprocess()
         data = self.dataset["predict"]["data_matrix"]
         self.n = data.shape[0]
@@ -41,11 +41,9 @@ class TestModel(unittest.TestCase):
 
     def test_feature_transformations_temporalize(self):
         X_train = temporalize(self.X_train_raw_scaled, self.window_size)
-
-        self.assertTrue(X_train.shape == (219, 10, 304))
+        self.assertEqual(X_train.shape, (self.n - self.window_size + 1, self.window_size, self.s))
 
     def test_feature_transformations_detemporalize(self):
         X_train = temporalize(self.X_train_raw_scaled, self.window_size)
         X_train_orig = detemporalize(X_train, self.window_size)
-
-        self.assertTrue(X_train_orig.shape == (228, 304))
+        self.assertEqual(X_train_orig.shape, (self.n, self.s))

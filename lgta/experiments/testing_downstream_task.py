@@ -20,9 +20,8 @@ SEED = 42
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-dataset = "tourism"
-freq = "M"
-top = None
+dataset = "tourism_small"
+freq = "Q"
 
 transformations = [
     {
@@ -50,7 +49,7 @@ transformations = [
 ]
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
-    dataset_name=dataset, freq=freq, top=top
+    dataset_name=dataset, freq=freq
 )
 
 model, _, _ = create_dataset_vae.fit()

@@ -7,7 +7,7 @@ from scipy.interpolate import CubicSpline
 class TestCreateTransformedDatasets(unittest.TestCase):
 
     def setUp(self):
-        self.dataset = "tourism"
+        self.dataset = "tourism_small"
         self.sigma_magnitude_warp = 0.2
         self.sigma_time_warp = 0.2
         np.random.seed(0)

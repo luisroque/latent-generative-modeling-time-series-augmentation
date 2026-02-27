@@ -20,28 +20,25 @@ from lgta.evaluation.evaluation_pipeline import (
 
 
 def run_comprehensive_evaluation(
-    dataset: str = "tourism",
-    freq: str = "M",
-    top: int = None,
+    dataset: str = "tourism_small",
+    freq: str = "Q",
     n_repetitions: int = 10,
 ):
     """
     Run comprehensive evaluation for a dataset.
 
     Args:
-        dataset: Dataset name ('tourism', 'm5', 'police')
-        freq: Frequency ('M', 'W', 'D')
-        top: Top N series to use (None for all)
+        dataset: Dataset name ('tourism_small' or 'synthetic')
+        freq: Frequency ('Q', 'D', etc.)
         n_repetitions: Number of evaluation runs for statistical robustness
     """
     print("=" * 80)
     print(f"COMPREHENSIVE EVALUATION: {dataset.upper()} DATASET")
     print("=" * 80)
 
-    # Step 1: Train VAE model
     print("\n[1/4] Training VAE model...")
     create_dataset_vae = CreateTransformedVersionsCVAE(
-        dataset_name=dataset, freq=freq, top=top
+        dataset_name=dataset, freq=freq
     )
     model, _, _ = create_dataset_vae.fit()
     X_hat, z, _, _ = create_dataset_vae.predict(model)
@@ -53,7 +50,7 @@ def run_comprehensive_evaluation(
     print("\n[2/4] Defining transformations to evaluate...")
 
     # Transformation configurations based on the dataset
-    if dataset == "tourism":
+    if dataset == "tourism_small":
         transformations = [
             {
                 "name": "jitter",
@@ -205,9 +202,8 @@ def generate_overall_summary(all_reports: dict, dataset: str):
 
 
 def compare_transformation_magnitudes(
-    dataset: str = "tourism",
-    freq: str = "M",
-    top: int = None,
+    dataset: str = "tourism_small",
+    freq: str = "Q",
     transformation: str = "jitter",
     magnitudes: list = None,
     n_repetitions: int = 5,
@@ -233,7 +229,7 @@ def compare_transformation_magnitudes(
     # Train model once
     print("\nTraining VAE model...")
     create_dataset_vae = CreateTransformedVersionsCVAE(
-        dataset_name=dataset, freq=freq, top=top
+        dataset_name=dataset, freq=freq
     )
     model, _, _ = create_dataset_vae.fit()
     X_hat, z, _, _ = create_dataset_vae.predict(model)
@@ -374,17 +370,14 @@ def visualize_magnitude_comparison(results: dict, transformation: str, dataset: 
 # Example usage
 if __name__ == "__main__":
     # Configuration
-    DATASET = "tourism"
-    FREQ = "M"
-    TOP = None
-    N_REPETITIONS = 10  # Number of runs for statistical robustness
+    DATASET = "tourism_small"
+    FREQ = "Q"
+    N_REPETITIONS = 10
 
-    # Run comprehensive evaluation
-    print("\n🚀 Starting Comprehensive Evaluation Pipeline\n")
+    print("\nStarting Comprehensive Evaluation Pipeline\n")
 
-    # Option 1: Evaluate all transformations
     reports = run_comprehensive_evaluation(
-        dataset=DATASET, freq=FREQ, top=TOP, n_repetitions=N_REPETITIONS
+        dataset=DATASET, freq=FREQ, n_repetitions=N_REPETITIONS
     )
 
     # Option 2: Compare across magnitudes (uncomment to run)

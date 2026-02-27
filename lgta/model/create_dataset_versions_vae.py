@@ -88,26 +88,21 @@ def _normalize_transformations(
 
 class CreateTransformedVersionsCVAE:
     """
-    Class for creating transformed versions of the dataset using a Conditional Variational Autoencoder (CVAE).
-
-    This class contains several methods to preprocess data, fit a CVAE, generate new time series, and
-    save transformed versions of the dataset. It's designed to be used with time-series data.
+    Creates transformed versions of a dataset using a Conditional Variational Autoencoder (CVAE).
+    Handles data preprocessing, model fitting, prediction, and generation of transformed time series.
 
     Args:
-        dataset_name: Name of the dataset.
+        dataset_name: Dataset identifier ('tourism_small' or 'synthetic').
         freq: Frequency of the time series data.
-        input_dir: Directory where the input data is located. Defaults to "./".
-        transf_data: Type of transformation applied to the data. Defaults to "whole".
-        top: Number of top series to select. Defaults to None.
-        window_size: Window size for the sliding window. Defaults to 10.
-        weekly_m5: If True, use the M5 competition's weekly grouping. Defaults to True.
-        test_size: Size of the test set. If None, the size is determined automatically. Defaults to None.
-        Below are parameters for the synthetic data creation:
-            num_base_series_time_points: Number of base time points in the series. Defaults to 100.
-            num_latent_dim: Dimension of the latent space. Defaults to 3.
-            num_variants: Number of variants for the transformation. Defaults to 20.
-            noise_scale: Scale of the Gaussian noise. Defaults to 0.1.
-            amplitude: Amplitude of the time series data. Defaults to 1.0.
+        input_dir: Root directory for data and assets. Defaults to "./".
+        transf_data: Transformation scope ('whole' or 'train'). Defaults to "whole".
+        window_size: Sliding window size. Defaults to 10.
+        test_size: Number of series to use. If None, uses all. Defaults to None.
+        num_base_series_time_points: Time points for synthetic data. Defaults to 100.
+        num_latent_dim: Latent dimensions for synthetic data. Defaults to 3.
+        num_variants: Variants per base series for synthetic data. Defaults to 20.
+        noise_scale: Noise scale for synthetic data. Defaults to 0.1.
+        amplitude: Seasonality amplitude for synthetic data. Defaults to 1.0.
     """
 
     def __init__(
@@ -116,10 +111,8 @@ class CreateTransformedVersionsCVAE:
         freq: str,
         input_dir: str = "./",
         transf_data: str = "whole",
-        top: int = None,
         window_size: int = 10,
-        weekly_m5: bool = True,
-        test_size: int = None,
+        test_size: int | None = None,
         num_base_series_time_points: int = 100,
         num_latent_dim: int = 3,
         num_variants: int = 20,
@@ -130,9 +123,7 @@ class CreateTransformedVersionsCVAE:
         self.input_dir = input_dir
         self.transf_data = transf_data
         self.freq = freq
-        self.top = top
         self.test_size = test_size
-        self.weekly_m5 = weekly_m5
         self.num_base_series_time_points = num_base_series_time_points
         self.num_latent_dim = num_latent_dim
         self.num_variants = num_variants
@@ -149,10 +140,9 @@ class CreateTransformedVersionsCVAE:
         self.n_train = self.n - self.window_size + 1
         self.groups = list(self.dataset["train"]["groups_names"].keys())
         self.df = pd.DataFrame(data)
-        self.df = pd.concat(
-            [self.df, pd.DataFrame(self.dataset["dates"], columns=["Date"])], axis=1
-        )[: self.n]
-        self.df = self.df.set_index("Date")
+        dates_series = pd.to_datetime(self.dataset["dates"][: self.n])
+        self.df = self.df.set_index(dates_series)
+        self.df.index.name = "Date"
         self.preprocess_freq()
         self.input_data = None
         self.device = _get_device()
@@ -187,23 +177,18 @@ class CreateTransformedVersionsCVAE:
         self.df_generate = self.df.copy()
         self.df_generate = self.df_generate.reindex(ix)
 
-    def _get_dataset(self):
-        ppc_args = {
-            "dataset": self.dataset_name,
-            "freq": self.freq,
-            "input_dir": self.input_dir,
-            "top": self.top,
-            "test_size": self.test_size,
-            "weekly_m5": self.weekly_m5,
-            "num_base_series_time_points": self.num_base_series_time_points,
-            "num_latent_dim": self.num_latent_dim,
-            "num_variants": self.num_variants,
-            "noise_scale": self.noise_scale,
-            "amplitude": self.amplitude,
-        }
-
-        dataset = ppc(**ppc_args).apply_preprocess()
-        return dataset
+    def _get_dataset(self) -> dict:
+        return ppc(
+            dataset=self.dataset_name,
+            freq=self.freq,
+            input_dir=self.input_dir,
+            test_size=self.test_size,
+            num_base_series_time_points=self.num_base_series_time_points,
+            num_latent_dim=self.num_latent_dim,
+            num_variants=self.num_variants,
+            noise_scale=self.noise_scale,
+            amplitude=self.amplitude,
+        ).apply_preprocess()
 
     def _create_directories(self):
         Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)

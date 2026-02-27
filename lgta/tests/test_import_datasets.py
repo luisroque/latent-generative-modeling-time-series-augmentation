@@ -1,89 +1,60 @@
 import unittest
 import numpy as np
 import lgta as tsag
-from lgta.tests.conftest import skip_unless_dataset
 
 
-class TestModel(unittest.TestCase):
-    def test_import_tourism_default(self):
-        skip_unless_dataset("tourism")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "tourism", freq="M"
+class TestImportTourismSmall(unittest.TestCase):
+    def test_import_tourism_small_default(self):
+        data = tsag.preprocessing.PreprocessDatasets(
+            "tourism_small", freq="Q"
         ).apply_preprocess()
-        self.assertTrue(self.data["train"]["data"].shape == (204, 304))
+        self.assertEqual(data["train"]["data"].shape, (32, 56))
 
-    def test_import_tourism(self):
-        skip_unless_dataset("tourism")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "tourism", freq="M", test_size=50
+    def test_import_tourism_small_test_size(self):
+        data = tsag.preprocessing.PreprocessDatasets(
+            "tourism_small", freq="Q", test_size=10
         ).apply_preprocess()
-        self.assertTrue(self.data["train"]["data"].shape == (204, 50))
+        self.assertEqual(data["train"]["data"].shape, (32, 10))
 
-    def test_import_m5(self):
-        skip_unless_dataset("m5")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "m5", test_size=2, freq="W"
+    def test_import_tourism_small_has_required_keys(self):
+        data = tsag.preprocessing.PreprocessDatasets(
+            "tourism_small", freq="Q"
         ).apply_preprocess()
-        self.assertTrue(self.data["train"]["data"].shape == (261, 2))
+        self.assertIn("train", data)
+        self.assertIn("predict", data)
+        self.assertIn("data", data["train"])
+        self.assertIn("data_matrix", data["predict"])
+        self.assertIn("groups_idx", data["train"])
+        self.assertIn("groups_names", data["train"])
+        self.assertIn("seasonality", data)
+        self.assertIn("h", data)
+        self.assertIn("dates", data)
 
-    def test_import_m5_daily(self):
-        skip_unless_dataset("m5")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "m5", test_size=2, top=5, freq="D", weekly_m5=False
+    def test_import_tourism_small_groups(self):
+        data = tsag.preprocessing.PreprocessDatasets(
+            "tourism_small", freq="Q"
         ).apply_preprocess()
-        self.assertTrue(self.data["train"]["data"].shape == (1883, 2))
+        expected_groups = {"Purpose", "State", "CityType"}
+        self.assertEqual(set(data["train"]["groups_names"].keys()), expected_groups)
+        self.assertEqual(len(data["train"]["groups_names"]["Purpose"]), 4)
+        self.assertEqual(len(data["train"]["groups_names"]["State"]), 7)
+        self.assertEqual(len(data["train"]["groups_names"]["CityType"]), 2)
 
-    def test_import_police(self):
-        skip_unless_dataset("police")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "police", top=2, freq="D"
+    def test_import_tourism_small_predict_shape(self):
+        data = tsag.preprocessing.PreprocessDatasets(
+            "tourism_small", freq="Q"
         ).apply_preprocess()
-        self.assertTrue(self.data["train"]["data"].shape == (304, 2))
+        self.assertEqual(data["predict"]["data_matrix"].shape, (36, 56))
 
-    def test_import_tourism_50perc_data_small_test(self):
-        skip_unless_dataset("tourism")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "tourism", test_size=2, freq="M", sample_perc=0.5
+    def test_import_tourism_small_seasonality_and_horizon(self):
+        data = tsag.preprocessing.PreprocessDatasets(
+            "tourism_small", freq="Q"
         ).apply_preprocess()
-        self.assertTrue(
-            self.data["train"]["data"].shape
-            == (int((228 - self.data["h"]) / 2) + 1, 2)
-        )
+        self.assertEqual(data["seasonality"], 4)
+        self.assertEqual(data["h"], 4)
 
-    def test_import_tourism_50perc_data_x_values(self):
-        skip_unless_dataset("tourism")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "tourism", test_size=2, freq="M", sample_perc=0.5
-        ).apply_preprocess()
-        self.assertListEqual(
-            self.data["predict"]["x_values"][-self.data["h"] :],
-            list(np.arange(228 - self.data["h"], 228)),
-        )
-
-    def test_import_tourism_50perc_data(self):
-        skip_unless_dataset("tourism")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "tourism", test_size=50, freq="M", sample_perc=0.5
-        ).apply_preprocess()
-        self.assertTrue(
-            self.data["train"]["data"].shape
-            == (int((228 - self.data["h"]) / 2) + 1, 50)
-        )
-
-    def test_import_m5_50perc_data(self):
-        skip_unless_dataset("m5")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "m5", test_size=2, freq="W", sample_perc=0.5
-        ).apply_preprocess()
-        self.assertTrue(
-            self.data["train"]["data"].shape == (int((275 - self.data["h"]) / 2) + 1, 2)
-        )
-
-    def test_import_police_50perc_data(self):
-        skip_unless_dataset("police")
-        self.data = tsag.preprocessing.PreprocessDatasets(
-            "police", top=2, freq="D", sample_perc=0.5
-        ).apply_preprocess()
-        self.assertTrue(
-            self.data["train"]["data"].shape == (int((334 - self.data["h"]) / 2) + 1, 2)
-        )
+    def test_import_unknown_dataset_raises(self):
+        with self.assertRaises(ValueError):
+            tsag.preprocessing.PreprocessDatasets(
+                "nonexistent", freq="Q"
+            ).apply_preprocess()

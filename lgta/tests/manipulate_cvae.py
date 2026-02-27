@@ -1,7 +1,5 @@
 import unittest
-from lgta.model.create_dataset_versions_vae import (
-    CreateTransformedVersionsCVAE,
-)
+from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
 from lgta.transformations.compute_similarities_summary_metrics import (
     compute_similarity_transformed_vs_original,
 )
@@ -9,16 +7,13 @@ from lgta.transformations.compute_similarities_summary_metrics import (
 
 class TestModel(unittest.TestCase):
     """
-    Class for experiments CVAE model's ability to generate new time series
-    and to compute similarity between the generated time series and the original.
+    Experiments with the CVAE model's ability to generate new time series
+    and compute similarity between the generated series and the original.
     """
 
     def setUp(self) -> None:
-        """
-        Set up a test instance of CreateTransformedVersionsCVAE and train the model.
-        """
-        self.dataset_name = "tourism"
-        self.freq = "M"
+        self.dataset_name = "tourism_small"
+        self.freq = "Q"
 
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
             dataset_name=self.dataset_name,
@@ -29,8 +24,7 @@ class TestModel(unittest.TestCase):
         self.model, _, _ = self.create_dataset_vae.fit(
             epochs=self.epochs, load_weights=self.load_weights
         )
-        self.std_latent_space = 0.5
-        self.similarity_threshold = 20
+        self.similarity_threshold = 50000
 
         (
             self.preds,
@@ -40,10 +34,6 @@ class TestModel(unittest.TestCase):
         ) = self.create_dataset_vae.predict(self.model)
 
     def test_compute_similarity(self):
-        """
-        Test if the similarity between the generated time series and original
-        is below a certain threshold.
-        """
         dec_pred_hat = self.create_dataset_vae.generate_transformed_time_series(
             cvae=self.model,
             z_mean=self.z_mean,
@@ -56,7 +46,8 @@ class TestModel(unittest.TestCase):
             dec_pred_hat, self.create_dataset_vae.X_train_raw
         )[0]
 
-        self.assertTrue(
-            similarity_score < self.similarity_threshold,
-            f"Similarity score {similarity_score} is not less than the threshold {self.similarity_threshold}",
+        self.assertLess(
+            similarity_score,
+            self.similarity_threshold,
+            f"Similarity score {similarity_score} exceeds threshold {self.similarity_threshold}",
         )

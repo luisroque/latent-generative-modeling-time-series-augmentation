@@ -63,10 +63,13 @@ def plot_generated_vs_original(
         n_series: number of series to plot
         directory: local directory to store the file
     """
-    # n_series needs to be even
+    n_series = min(n_series, dec_pred_hat.shape[1])
     if not n_series % 2 == 0:
         n_series -= 1
-    _, ax = plt.subplots(int(n_series // 2), int(n_series // 4), figsize=(18, 10))
+    n_series = max(n_series, 2)
+    n_cols = min(n_series, 2)
+    n_rows = max(1, n_series // n_cols)
+    _, ax = plt.subplots(n_rows, n_cols, figsize=(18, 10))
     ax = ax.ravel()
     n_samples = X_train_raw.shape[0]
     for i in range(n_series):

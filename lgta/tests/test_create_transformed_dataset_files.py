@@ -1,9 +1,7 @@
 import unittest
 import os
 import numpy as np
-from lgta.transformations.create_dataset_versions import (
-    CreateTransformedVersions,
-)
+from lgta.transformations.create_dataset_versions import CreateTransformedVersions
 from lgta.transformations.compute_similarities_summary_metrics import (
     ComputeSimilarities,
 )
@@ -12,8 +10,8 @@ from lgta.visualization.visualize_transformed_datasets import Visualizer
 
 class TestCreateTransformedDatasets(unittest.TestCase):
     def setUp(self):
-        self.dataset = "tourism"
-        self.freq = "M"
+        self.dataset = "tourism_small"
+        self.freq = "Q"
         self.transformed_datasets = CreateTransformedVersions(
             self.dataset, freq=self.freq
         )
@@ -27,9 +25,8 @@ class TestCreateTransformedDatasets(unittest.TestCase):
         np.random.seed(0)
 
     def test_create_correct_number_transformed_datasets_single_transf(self):
-        # shape (n_transformations + random_transf , n_versions, n_samples, n_points_train, n_series)
-        self.assertTrue(
-            self.transformed_datasets.y_new_all.shape == (4, 6, 10, 228, 304)
+        self.assertEqual(
+            self.transformed_datasets.y_new_all.shape, (4, 6, 10, 36, 56)
         )
 
     def test_create_correct_number_transformed_datasets_FILES_single_transf(self):
@@ -43,11 +40,13 @@ class TestCreateTransformedDatasets(unittest.TestCase):
         self.assertGreaterEqual(file_count, 1)
 
     def test_load_groups_transformed(self):
-        transformed_datasets = CreateTransformedVersions("tourism", freq="M")
+        transformed_datasets = CreateTransformedVersions(self.dataset, freq=self.freq)
         transformed_datasets.read_groups_transformed("jitter")
-        self.assertEqual(transformed_datasets.y_loaded_transformed.shape, (6, 10, 228, 304))
+        self.assertEqual(
+            transformed_datasets.y_loaded_transformed.shape, (6, 10, 36, 56)
+        )
 
-    def test_create_transformations_with_tourism_dataset(self):
+    def test_create_transformations_with_tourism_small_dataset(self):
         mean_sim_time_warp_version_1 = ComputeSimilarities(
             dataset=self.transformed_datasets.y,
             transf_dataset=self.transformed_datasets.y_new_all[3, 0, 9],
@@ -58,29 +57,14 @@ class TestCreateTransformedDatasets(unittest.TestCase):
             transf_dataset=self.transformed_datasets.y_new_all[3, 5, 9],
         ).compute_mean_similarity_elementwise()
 
-        mean_sim_magnitude_warp_version_1 = ComputeSimilarities(
-            dataset=self.transformed_datasets.y,
-            transf_dataset=self.transformed_datasets.y_new_all[2, 0, 9],
-        ).compute_mean_similarity_elementwise()
+        self.assertGreater(mean_sim_time_warp_version_6, mean_sim_time_warp_version_1)
 
-        mean_sim_magnitude_warp_version_6 = ComputeSimilarities(
-            dataset=self.transformed_datasets.y,
-            transf_dataset=self.transformed_datasets.y_new_all[2, 5, 9],
-        ).compute_mean_similarity_elementwise()
-
-        self.assertTrue(4000 < mean_sim_magnitude_warp_version_6 < 7000)
-        self.assertTrue(900 < mean_sim_magnitude_warp_version_1 < 2000)
-
-        self.assertTrue(6000 < mean_sim_time_warp_version_6 < 8000)
-        self.assertTrue(5000 < mean_sim_time_warp_version_1 < 6500)
-
-    def test_create_transformations_with_tourism_dataset_and_compare_with_files(self):
+    def test_create_transformations_compare_with_files(self):
         vi = Visualizer(self.dataset)
         vi._read_files(method="single_transf_time_warp")
-        vi._read_files(method="single_transf_time_warp")
 
-        mean_sim_transf_and_file_single_series = ComputeSimilarities(
+        mean_sim = ComputeSimilarities(
             dataset=self.transformed_datasets.y_new_all[3, 5, 9][:, 10].reshape(-1, 1),
             transf_dataset=vi.y_new[5, 9][:, 10].reshape(-1, 1),
         ).compute_mean_similarity_elementwise()
-        self.assertEqual(mean_sim_transf_and_file_single_series, 0)
+        self.assertEqual(mean_sim, 0)

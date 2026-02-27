@@ -169,6 +169,7 @@ model_binaries/
 model_weights/
 
 # data related
+data/
 original_datasets/
 transformed_datasets/
 assets/data/

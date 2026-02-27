@@ -1,25 +1,18 @@
 import unittest
 from lgta.preprocessing import PreprocessDatasets
-from lgta.model.create_dataset_versions_vae import (
-    CreateTransformedVersionsCVAE,
-)
+from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
 
 
-class PreprocessDatasetsTestCase(unittest.TestCase):
+class TestSyntheticDataset(unittest.TestCase):
     def setUp(self):
         self.dataset = "synthetic"
         self.freq = "D"
 
-    def test_add_synthetic_dataset(self):
-        self.preprocess_datasets = PreprocessDatasets(
+    def test_synthetic_dataset_structure(self):
+        groups = PreprocessDatasets(
             dataset=self.dataset, freq=self.freq
-        )
-        self.preprocess_datasets._synthetic()
+        ).apply_preprocess()
 
-        groups = self.preprocess_datasets._load_pickle_file(
-            self.preprocess_datasets.pickle_path
-        )
-        self.assertIsNotNone(groups)
         self.assertIn("train", groups)
         self.assertIn("predict", groups)
         self.assertIn("groups_idx", groups["train"])
@@ -27,7 +20,7 @@ class PreprocessDatasetsTestCase(unittest.TestCase):
         self.assertIn("groups_names", groups["train"])
         self.assertIn("s", groups["train"])
         self.assertIn("n", groups["train"])
-        self.assertTrue((100, 3), groups["base_series"].shape)
+        self.assertEqual(groups["base_series"].shape, (3, 100, 1))
 
     def test_synthetic_dataset_CVAE(self):
         create_dataset_cvae = CreateTransformedVersionsCVAE(
@@ -50,4 +43,4 @@ class PreprocessDatasetsTestCase(unittest.TestCase):
             transformation="jitter",
         )
 
-        self.assertTrue(dec_pred_hat.shape, (100, 60))
+        self.assertEqual(dec_pred_hat.shape, (100, 60))
