@@ -5,8 +5,9 @@ optionally applying sequential transformation chains to the latent samples.
 Follows the theory: v'_i = T_n(...T_2(T_1(v_i, eta_1), eta_2)..., eta_n)
 """
 
-from typing import Optional, Union
-from tensorflow import keras
+from typing import Optional
+import torch
+import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
 from lgta.feature_engineering.feature_transformations import detemporalize
@@ -14,7 +15,7 @@ from lgta.transformations.manipulate_data import ManipulateData
 
 
 def generate_new_time_series(
-    cvae: keras.Model,
+    cvae: nn.Module,
     z_mean: np.ndarray,
     z_log_var: np.ndarray,
     window_size: int,
@@ -24,6 +25,7 @@ def generate_new_time_series(
     n: int,
     transformations: Optional[list[str]] = None,
     transf_params: Optional[list[float]] = None,
+    device: Optional[torch.device] = None,
 ) -> np.ndarray:
     """
     Generate new time series by sampling per-timestep latent variables from
@@ -40,32 +42,40 @@ def generate_new_time_series(
         n: Total number of time points.
         transformations: List of transformation names to chain on latent samples.
         transf_params: Corresponding parameters for each transformation.
+        device: Torch device for inference.
 
     Returns:
         Generated time series of shape (n, n_features).
     """
+    if device is None:
+        device = torch.device("cpu")
+
     latent_dim = z_mean.shape[-1]
     z_std = np.exp(z_log_var * 0.5)
 
     dec_pred = []
 
-    for id_seq in range(n - window_size + 1):
-        # v_t ~ N(mu_t, Sigma_t) — per-timestep sampling
-        v = np.random.normal(z_mean[id_seq], z_std[id_seq])
+    cvae.eval()
+    with torch.no_grad():
+        for id_seq in range(n - window_size + 1):
+            v = np.random.normal(z_mean[id_seq], z_std[id_seq])
 
-        # Apply transformation chain: v' = T_n(...T_1(v, eta_1)..., eta_n)
-        if transformations is not None:
-            for transformation, param in zip(transformations, transf_params):
-                v = ManipulateData(
-                    x=v, transformation=transformation, parameters=[param]
-                ).apply_transf()
+            if transformations is not None:
+                for transformation, param in zip(transformations, transf_params):
+                    v = ManipulateData(
+                        x=v, transformation=transformation, parameters=[param]
+                    ).apply_transf()
 
-        d_feat = dynamic_features_inp[id_seq : id_seq + 1, :, :]
-        dec_pred.append(
-            cvae.decoder.predict(
-                [v.reshape(1, window_size, latent_dim), d_feat], verbose=0
+            d_feat = dynamic_features_inp[id_seq : id_seq + 1, :, :]
+            v_tensor = torch.tensor(
+                v.reshape(1, window_size, latent_dim),
+                dtype=torch.float32,
+                device=device,
             )
-        )
+            d_tensor = torch.tensor(d_feat, dtype=torch.float32, device=device)
+
+            pred = cvae.decoder(v_tensor, d_tensor)
+            dec_pred.append(pred.cpu().numpy())
 
     dec_pred_hat = detemporalize(np.squeeze(np.array(dec_pred)), window_size)
     dec_pred_hat = scaler_target.inverse_transform(dec_pred_hat)

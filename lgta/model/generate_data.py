@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from lgta.transformations import ManipulateData
 from lgta.feature_engineering.feature_transformations import detemporalize
 from lgta.transformations.apply_transformations_benchmark import (
@@ -14,20 +15,24 @@ def generate_synthetic_data(model, z, create_dataset_vae, transformation, params
 
     z has shape (n_windows, window_size, latent_dim) for per-timestep latent variables.
     """
-    all_preds = []
+    device = next(model.parameters()).device
 
-    for dynamic_feat, X_inp in create_dataset_vae.input_data:
-        original_shape = z.shape
-        z_2d = z.reshape(z.shape[0], -1)
-        manipulate_data = ManipulateData(z_2d, transformation, list(params))
-        z_modified = manipulate_data.apply_transf().reshape(original_shape)
+    dynamic_features_np, _ = create_dataset_vae.input_data
 
-        preds = model.decoder.predict([z_modified, dynamic_feat])
-        all_preds.append(preds)
+    original_shape = z.shape
+    z_2d = z.reshape(z.shape[0], -1)
+    manipulate_data = ManipulateData(z_2d, transformation, list(params))
+    z_modified = manipulate_data.apply_transf().reshape(original_shape)
 
-    all_preds = np.concatenate(all_preds, axis=0)
+    model.eval()
+    with torch.no_grad():
+        z_tensor = torch.tensor(z_modified, dtype=torch.float32, device=device)
+        dyn_tensor = torch.tensor(
+            dynamic_features_np[0], dtype=torch.float32, device=device
+        )
+        preds = model.decoder(z_tensor, dyn_tensor).cpu().numpy()
 
-    preds = detemporalize(all_preds, create_dataset_vae.window_size)
+    preds = detemporalize(preds, create_dataset_vae.window_size)
     X_hat = create_dataset_vae.scaler_target.inverse_transform(preds)
 
     return X_hat
@@ -45,7 +50,6 @@ def generate_datasets(
     parameters_benchmark,
     version,
 ):
-    # apply transformations and generate synthetic data
     X_hat = generate_synthetic_data(
         model, z, create_dataset_vae, transformation, params
     )
@@ -53,7 +57,6 @@ def generate_datasets(
         dataset, freq, parameters_benchmark, standardize=False
     )
 
-    # reshape and clip datasets
     X_orig, X_hat_transf, X_benchmark = reshape_datasets(
         X_orig,
         X_hat,

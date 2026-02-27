@@ -183,4 +183,5 @@ build/
 *.npy
 *.log
 *.txt
+!requirements.txt
 *.csv

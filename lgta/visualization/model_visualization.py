@@ -1,22 +1,21 @@
 import matplotlib.pyplot as plt
-from keras.callbacks import History
 import numpy as np
 
 
-def plot_loss(history: History, first_index: int, dataset_name: str) -> None:
+def plot_loss(history: dict[str, list[float]], first_index: int, dataset_name: str) -> None:
     """
     Plot total loss, reconstruction loss and kl_loss per epoch
 
-    :param history: recorded loss
+    :param history: recorded loss dictionary with keys "loss", "reconstruction_loss", "kl_loss"
     :param first_index: first index of the loss arrays to plot to avoid hard to read plots
     :param dataset_name: name of the dataset to plot and store
     """
 
     _, ax = plt.subplots(1, 1, figsize=(8, 6))
 
-    ax.plot(history.history["loss"][first_index:])
-    ax.plot(history.history["reconstruction_loss"][first_index:])
-    ax.plot(history.history["kl_loss"][first_index:])
+    ax.plot(history["loss"][first_index:])
+    ax.plot(history["reconstruction_loss"][first_index:])
+    ax.plot(history["kl_loss"][first_index:])
     ax.set_title("model loss")
     ax.set_ylabel("loss")
     ax.set_xlabel("epoch")

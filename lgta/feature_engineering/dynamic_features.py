@@ -27,15 +27,20 @@ def create_dynamic_features(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     periods = freq_to_period.get(freq, ("year",))
 
     for period in periods:
-        max_val = getattr(df.index, period).max()
-        min_val = getattr(df.index, period).min()
+        if period == "week":
+            values = df.index.isocalendar().week.astype(int)
+        else:
+            values = getattr(df.index, period)
+
+        max_val = values.max()
+        min_val = values.min()
 
         if (max_val - min_val) > 0:
             train_df_input[f"{period}_cos"] = np.cos(
-                2 * np.pi * (getattr(df.index, period) - min_val) / (max_val - min_val)
+                2 * np.pi * (values - min_val) / (max_val - min_val)
             )
             train_df_input[f"{period}_sin"] = np.sin(
-                2 * np.pi * (getattr(df.index, period) - min_val) / (max_val - min_val)
+                2 * np.pi * (values - min_val) / (max_val - min_val)
             )
 
     return train_df_input.astype(np.float32)
