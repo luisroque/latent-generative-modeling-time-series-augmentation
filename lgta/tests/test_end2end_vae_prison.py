@@ -10,7 +10,7 @@ from lgta.transformations.compute_similarities_summary_metrics import (
 class TestModel(unittest.TestCase):
     def setUp(self) -> None:
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
-            dataset_name="prison", freq="Q", dynamic_feat_trig=False
+            dataset_name="prison", freq="Q"
         )
 
         self.model, _, _ = self.create_dataset_vae.fit(epochs=5, load_weights=False)

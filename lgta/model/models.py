@@ -1,172 +1,239 @@
-import tensorflow as tf
-from tensorflow import keras
-from keras.layers import (
-    Input,
-    Bidirectional,
-    Concatenate,
-    LSTM,
-    Dense,
-    MultiHeadAttention,
-    LayerNormalization,
-    Dropout,
-    RepeatVector,
-    BatchNormalization,
-    TimeDistributed,
-    Flatten,
-    Reshape,
-)
-from keras.regularizers import l2
-from keras import backend as K
-from keras.models import Model
+"""
+L-GTA model architecture: Conditional Variational Autoencoder (CVAE) with
+Bi-LSTM encoder/decoder and Variational Multi-Head Attention (VMHA).
+
+Encoder: Bi-LSTM(z) -> h_t, then VMHA(h_t, c) -> phi -> (mu_t, Sigma_t) -> v_t
+Decoder: Bi-LSTM(v_t, c) -> psi(y_t) -> z_tilde_t
+"""
+
+import torch
+import torch.nn as nn
 from .helper import Sampling
 
-# tf.config.run_functions_eagerly(True)
+
+class PositionalEmbedding(nn.Module):
+    """Learned positional embedding added to input sequences."""
+
+    def __init__(self, max_seq_len: int, embed_dim: int):
+        super().__init__()
+        self.pos_embedding = nn.Parameter(
+            torch.empty(max_seq_len, embed_dim)
+        )
+        nn.init.xavier_uniform_(self.pos_embedding.unsqueeze(0))
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        seq_len = inputs.shape[1]
+        return inputs + self.pos_embedding[:seq_len, :].unsqueeze(0)
 
 
-class PositionalEmbedding(keras.layers.Layer):
+class VariationalMultiHeadAttention(nn.Module):
+    """VMHA(h_t, c): Enriches Bi-LSTM hidden states h_t with condition c through
+    self-attention (long-range temporal dependencies) and cross-attention
+    (condition-aware representations). Preserves per-timestep temporal structure
+    for subsequent variational sampling.
     """
-    Learned positional embedding layer.
-    """
 
-    def __init__(self, max_seq_len, embed_dim, **kwargs):
-        super(PositionalEmbedding, self).__init__(**kwargs)
-        self.max_seq_len = max_seq_len
-        self.embed_dim = embed_dim
-
-    def build(self, input_shape):
-        self.pos_embedding = self.add_weight(
-            shape=(self.max_seq_len, self.embed_dim),
-            initializer="glorot_uniform",
-            trainable=True,
-            name="pos_embedding",
-        )
-        super(PositionalEmbedding, self).build(input_shape)
-
-    def call(self, inputs):
-        seq_len = tf.shape(inputs)[1]
-        pos_encoding = self.pos_embedding[:seq_len, :]
-        pos_encoding = tf.expand_dims(pos_encoding, axis=0)
-        return inputs + pos_encoding
-
-    def get_config(self):
-        config = super(PositionalEmbedding, self).get_config()
-        config.update({"max_seq_len": self.max_seq_len, "embed_dim": self.embed_dim})
-        return config
-
-
-class TransformerBlockWithPosEncoding(tf.keras.layers.Layer):
-    def __init__(self, num_heads, ff_dim, max_seq_len, rate=0.3, **kwargs):
-        super(TransformerBlockWithPosEncoding, self).__init__(**kwargs)
-        self.num_heads = num_heads
-        self.ff_dim = ff_dim
-        self.max_seq_len = max_seq_len
-        self.rate = rate
-
-    def build(self, input_shape):
-        embed_dim = input_shape[-1]
-        self.pos_embed_layer = PositionalEmbedding(self.max_seq_len, embed_dim)
-        self.mhatt = MultiHeadAttention(
-            num_heads=self.num_heads, key_dim=embed_dim, name="multi_head_attention"
-        )
-        self.ffn = tf.keras.Sequential(
-            [
-                Dense(
-                    self.ff_dim, activation="relu", kernel_initializer="glorot_uniform"
-                ),
-                Dense(embed_dim, kernel_initializer="glorot_uniform"),
-            ],
-            name="ffn",
-        )
-
-        self.layernorm1 = LayerNormalization(epsilon=1e-6, name="layer_norm_1")
-        self.layernorm2 = LayerNormalization(epsilon=1e-6, name="layer_norm_2")
-        self.dropout1 = Dropout(self.rate, name="dropout_1")
-        self.dropout2 = Dropout(self.rate, name="dropout_2")
-        super(TransformerBlockWithPosEncoding, self).build(input_shape)
-
-    def call(self, inputs, training=False):
-        x = self.pos_embed_layer(inputs)
-        attn_output = self.mhatt(x, x)
-        attn_output = self.dropout1(attn_output, training=training)
-        out1 = self.layernorm1(x + attn_output)
-
-        ffn_output = self.ffn(out1)
-        ffn_output = self.dropout2(ffn_output, training=training)
-        out2 = self.layernorm2(out1 + ffn_output)
-        context_vector = tf.reduce_mean(out2, axis=1)
-        return context_vector
-
-    def get_config(self):
-        config = super(TransformerBlockWithPosEncoding, self).get_config()
-        config.update(
-            {
-                "num_heads": self.num_heads,
-                "ff_dim": self.ff_dim,
-                "max_seq_len": self.max_seq_len,
-                "rate": self.rate,
-            }
-        )
-        return config
-
-
-class CVAE(keras.Model):
     def __init__(
         self,
-        encoder: keras.Model,
-        decoder: keras.Model,
+        h_dim: int,
+        c_dim: int,
+        num_heads: int,
+        ff_dim: int,
+        max_seq_len: int,
+        rate: float = 0.3,
+    ):
+        super().__init__()
+        self.pos_embed = PositionalEmbedding(max_seq_len, h_dim)
+        self.c_proj = nn.Linear(c_dim, h_dim)
+
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=h_dim, num_heads=num_heads, batch_first=True
+        )
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=h_dim, num_heads=num_heads, batch_first=True
+        )
+
+        self.ffn = nn.Sequential(
+            nn.Linear(h_dim, ff_dim),
+            nn.ReLU(),
+            nn.Linear(ff_dim, h_dim),
+        )
+
+        self.ln_self = nn.LayerNorm(h_dim, eps=1e-6)
+        self.ln_cross = nn.LayerNorm(h_dim, eps=1e-6)
+        self.ln_ffn = nn.LayerNorm(h_dim, eps=1e-6)
+
+        self.drop_self = nn.Dropout(rate)
+        self.drop_cross = nn.Dropout(rate)
+        self.drop_ffn = nn.Dropout(rate)
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        nn.init.xavier_uniform_(self.c_proj.weight)
+        for layer in self.ffn:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+
+    def forward(
+        self, h: torch.Tensor, c: torch.Tensor
+    ) -> torch.Tensor:
+        c_proj = self.c_proj(c)
+        h = self.pos_embed(h)
+
+        self_out, _ = self.self_attn(h, h, h)
+        self_out = self.drop_self(self_out)
+        h = self.ln_self(h + self_out)
+
+        cross_out, _ = self.cross_attn(query=h, key=c_proj, value=c_proj)
+        cross_out = self.drop_cross(cross_out)
+        h = self.ln_cross(h + cross_out)
+
+        ffn_out = self.ffn(h)
+        ffn_out = self.drop_ffn(ffn_out)
+        return self.ln_ffn(h + ffn_out)
+
+
+class Encoder(nn.Module):
+    """Bi-LSTM encoder with VMHA and per-timestep variational sampling."""
+
+    def __init__(
+        self,
+        window_size: int,
+        n_main_features: int,
+        n_dyn_features: int,
+        latent_dim: int,
+        num_heads: int = 8,
+        ff_dim: int = 256,
+    ):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=n_main_features,
+            hidden_size=n_main_features,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.batch_norm = nn.BatchNorm1d(window_size)
+
+        self.vmha = VariationalMultiHeadAttention(
+            h_dim=n_main_features,
+            c_dim=n_dyn_features,
+            num_heads=num_heads,
+            ff_dim=ff_dim,
+            max_seq_len=window_size,
+        )
+
+        self.dropout = nn.Dropout(0.3)
+
+        self.dense_latent = nn.Linear(n_main_features, latent_dim)
+        self.batch_norm_latent = nn.BatchNorm1d(window_size)
+
+        self.z_mean_layer = nn.Linear(latent_dim, latent_dim)
+        self.z_log_var_layer = nn.Linear(latent_dim, latent_dim)
+
+        self.sampling = Sampling()
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        nn.init.xavier_uniform_(self.dense_latent.weight)
+        nn.init.xavier_uniform_(self.z_mean_layer.weight)
+        nn.init.xavier_uniform_(self.z_log_var_layer.weight)
+
+    def forward(
+        self, dyn_inp: torch.Tensor, inp: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h, _ = self.lstm(inp)
+        # Average forward and backward directions (merge_mode="ave")
+        h = (h[:, :, : inp.shape[-1]] + h[:, :, inp.shape[-1] :]) / 2.0
+
+        h = self.batch_norm(h)
+
+        enc = self.vmha(h, dyn_inp)
+        enc = self.dropout(enc)
+
+        enc = torch.relu(self.dense_latent(enc))
+        enc = self.batch_norm_latent(enc)
+
+        z_mean = self.z_mean_layer(enc)
+        z_log_var = self.z_log_var_layer(enc)
+
+        z = self.sampling(z_mean, z_log_var)
+        return z_mean, z_log_var, z
+
+
+class Decoder(nn.Module):
+    """Bi-LSTM decoder that reconstructs time series from latent + condition."""
+
+    def __init__(
+        self,
+        window_size: int,
+        n_main_features: int,
+        n_dyn_features: int,
+        latent_dim: int,
+    ):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=latent_dim + n_dyn_features,
+            hidden_size=n_main_features,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.output_layer = nn.Linear(n_main_features, n_main_features)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        nn.init.xavier_uniform_(self.output_layer.weight)
+
+    def forward(
+        self, z: torch.Tensor, dyn_inp: torch.Tensor
+    ) -> torch.Tensor:
+        dec = torch.cat([z, dyn_inp], dim=-1)
+
+        dec, _ = self.lstm(dec)
+        # Average forward and backward directions (merge_mode="ave")
+        hidden_size = dec.shape[-1] // 2
+        dec = (dec[:, :, :hidden_size] + dec[:, :, hidden_size:]) / 2.0
+
+        return self.output_layer(dec)
+
+
+class CVAE(nn.Module):
+    """Conditional Variational Autoencoder combining encoder and decoder."""
+
+    def __init__(
+        self,
+        encoder: Encoder,
+        decoder: Decoder,
         window_size: int,
         kl_weight: float = 1.0,
-        **kwargs,
     ) -> None:
-        super(CVAE, self).__init__(**kwargs)
+        super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.window_size = window_size
         self.kl_weight = kl_weight
 
-        self.total_loss_tracker = keras.metrics.Mean(name="total_loss")
-        self.reconstruction_loss_tracker = keras.metrics.Mean(
-            name="reconstruction_loss"
-        )
-        self.kl_loss_tracker = keras.metrics.Mean(name="kl_loss")
+    def forward(
+        self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
+    ) -> torch.Tensor:
+        z_mean, z_log_var, z = self.encoder(dynamic_features, inp_data)
+        return self.decoder(z, dynamic_features)
 
-    def call(self, inputs, training=None, mask=None):
-        dynamic_features, inp_data = inputs
-        z_mean, z_log_var, z = self.encoder([dynamic_features, inp_data])
-        pred = self.decoder([z, dynamic_features])
-        return pred
+    def compute_loss(
+        self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        z_mean, z_log_var, z = self.encoder(dynamic_features, inp_data)
+        pred = self.decoder(z, dynamic_features)
 
-    @property
-    def metrics(self) -> list:
-        return [
-            self.total_loss_tracker,
-            self.reconstruction_loss_tracker,
-            self.kl_loss_tracker,
-        ]
-
-    def train_step(self, data: list) -> dict:
-        dynamic_features, inp_data = data
-
-        with tf.GradientTape() as tape:
-            z_mean, z_log_var, z = self.encoder([dynamic_features, inp_data])
-            pred = self.decoder([z, dynamic_features])
-
-            reconstruction_loss = K.mean(K.square(inp_data - pred))
-            kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
-            kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
-            total_loss = reconstruction_loss + self.kl_weight * kl_loss
-
-        grads = tape.gradient(total_loss, self.trainable_weights)
-        self.optimizer.apply_gradients(zip(grads, self.trainable_weights))
-
-        self.total_loss_tracker.update_state(total_loss)
-        self.reconstruction_loss_tracker.update_state(reconstruction_loss)
-        self.kl_loss_tracker.update_state(kl_loss)
+        reconstruction_loss = torch.mean((inp_data - pred) ** 2)
+        kl_loss = -0.5 * (1 + z_log_var - z_mean.pow(2) - z_log_var.exp())
+        kl_loss = kl_loss.sum(dim=[1, 2]).mean()
+        total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
         return {
-            "loss": self.total_loss_tracker.result(),
-            "reconstruction_loss": self.reconstruction_loss_tracker.result(),
-            "kl_loss": self.kl_loss_tracker.result(),
+            "loss": total_loss,
+            "reconstruction_loss": reconstruction_loss,
+            "kl_loss": kl_loss,
         }
 
 
@@ -177,97 +244,19 @@ def get_CVAE(
     latent_dim: int,
     num_heads: int = 8,
     ff_dim: int = 256,
-) -> tuple[keras.Model, keras.Model]:
-    # Encoder
-    inp = Input(shape=(window_size, n_main_features), name="input_main_CVAE")
-    dyn_inp = Input(shape=(window_size, n_dyn_features), name="input_dyn_CVAE")
-
-    enc = Concatenate(name="concat_encoder_inputs_CVAE")([dyn_inp, inp])
-
-    enc = Bidirectional(
-        LSTM(
-            n_main_features,
-            kernel_initializer="glorot_uniform",
-            input_shape=(window_size, n_main_features + n_dyn_features),
-            dropout=0.3,
-            kernel_regularizer=l2(0.001),
-            name="bidirectional_lstm_CVAE",
-            return_sequences=True,
-        ),
-        merge_mode="ave",
-    )(enc)
-
-    enc = BatchNormalization(name="batch_norm_encoder")(enc)
-
-    enc = TransformerBlockWithPosEncoding(
+) -> tuple[Encoder, Decoder]:
+    encoder = Encoder(
+        window_size=window_size,
+        n_main_features=n_main_features,
+        n_dyn_features=n_dyn_features,
+        latent_dim=latent_dim,
         num_heads=num_heads,
         ff_dim=ff_dim,
-        max_seq_len=window_size,
-        name="transformer_block_CVAE",
-    )(enc)
-
-    enc = Dropout(0.3, name="dropout_CVAE")(enc)
-
-    enc = Dense(
-        latent_dim,
-        activation="relu",
-        kernel_regularizer=l2(0.001),
-        kernel_initializer="glorot_uniform",
-        name="dense_latent_CVAE",
-    )(enc)
-
-    enc = BatchNormalization(name="batch_norm_latent")(enc)
-
-    z_mean = Dense(latent_dim, kernel_initializer="glorot_uniform", name="z_mean")(enc)
-    z_log_var = Dense(
-        latent_dim, kernel_initializer="glorot_uniform", name="z_log_var"
-    )(enc)
-
-    z = Sampling(name="sampling_layer")([z_mean, z_log_var])
-
-    encoder = Model([dyn_inp, inp], [z_mean, z_log_var, z], name="encoder_CVAE")
-
-    # Decoder
-    inp_z = Input(shape=(latent_dim,), name="input_latent_CVAE")
-    dec_dyn_inp = Input(
-        shape=(window_size, n_dyn_features), name="input_dyn_decoder_CVAE"
     )
-
-    dec = RepeatVector(window_size, name="repeat_vector_CVAE")(inp_z)
-    dec = Concatenate(name="concat_decoder_inputs_CVAE")([dec, dec_dyn_inp])
-
-    dec = Bidirectional(
-        LSTM(
-            n_main_features,
-            kernel_initializer="glorot_uniform",
-            input_shape=(window_size, latent_dim + n_dyn_features),
-            return_sequences=True,
-            dropout=0.3,
-            kernel_regularizer=l2(0.001),
-            name="bidirectional_lstm_decoder_CVAE",
-        ),
-        merge_mode="ave",
-    )(dec)
-
-    # dec = BatchNormalization(name="batch_norm_decoder")(dec)
-    #
-    # out = TimeDistributed(
-    #     Dense(
-    #         n_main_features,
-    #         kernel_regularizer=l2(0.001),
-    #         kernel_initializer="glorot_uniform",
-    #     ),
-    #     name="time_distributed_output_dense",
-    # )(dec)
-
-    out = Flatten(name="flatten_decoder_output_CVAE")(dec)
-    out = Dense(
-        window_size * n_main_features,
-        kernel_regularizer=l2(0.001),
-        name="dense_output_CVAE",
-    )(out)
-    out = Reshape((window_size, n_main_features), name="reshape_final_output_CVAE")(out)
-
-    decoder = Model([inp_z, dec_dyn_inp], out, name="decoder_CVAE")
-
+    decoder = Decoder(
+        window_size=window_size,
+        n_main_features=n_main_features,
+        n_dyn_features=n_dyn_features,
+        latent_dim=latent_dim,
+    )
     return encoder, decoder

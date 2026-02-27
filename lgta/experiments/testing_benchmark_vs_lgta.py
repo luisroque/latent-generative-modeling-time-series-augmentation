@@ -40,7 +40,7 @@ top = None
 
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
-    dataset_name=dataset, freq=freq, top=top, dynamic_feat_trig=False
+    dataset_name=dataset, freq=freq, top=top
 )
 model, _, _ = create_dataset_vae.fit()
 X_hat, z, _, _ = create_dataset_vae.predict(model)
@@ -86,29 +86,29 @@ transformations_plot = [
     },
 ]
 
-plot_transformations_with_generate_datasets(
-    dataset=dataset,
-    freq=freq,
-    generate_datasets=generate_datasets,
-    X_orig=X_orig,
-    model=model,
-    z=z,
-    create_dataset_vae=create_dataset_vae,
-    transformations=transformations_plot,
-    num_series=4,
-)
+# plot_transformations_with_generate_datasets(
+#     dataset=dataset,
+#     freq=freq,
+#     generate_datasets=generate_datasets,
+#     X_orig=X_orig,
+#     model=model,
+#     z=z,
+#     create_dataset_vae=create_dataset_vae,
+#     transformations=transformations_plot,
+#     num_series=4,
+# )
 
-plot_single_time_series(
-    dataset=dataset,
-    freq=freq,
-    generate_datasets=generate_datasets,
-    X_orig=X_orig,
-    model=model,
-    z=z,
-    create_dataset_vae=create_dataset_vae,
-    transformations=transformations_plot,
-    num_series=4,
-)
+# plot_single_time_series(
+#     dataset=dataset,
+#     freq=freq,
+#     generate_datasets=generate_datasets,
+#     X_orig=X_orig,
+#     model=model,
+#     z=z,
+#     create_dataset_vae=create_dataset_vae,
+#     transformations=transformations_plot,
+#     num_series=4,
+# )
 
 ######################
 # magnitude comparison
@@ -227,7 +227,7 @@ X_orig, X_lgta, X_benchmark = generate_datasets(
 residuals_lgta, residuals_benchmark = standardize_and_calculate_residuals(
     X_orig, X_lgta, X_benchmark
 )
-plot_series_comparisons(X_orig, X_lgta, X_benchmark, "jittering")
+# plot_series_comparisons(X_orig, X_lgta, X_benchmark, "jittering")
 analyze_transformations(residuals_lgta, residuals_benchmark)
 
 ######################

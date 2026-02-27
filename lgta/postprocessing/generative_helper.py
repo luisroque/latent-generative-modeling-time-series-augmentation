@@ -1,65 +1,81 @@
-from typing import List, Optional
-from tensorflow import keras
+"""
+Generation of new time series by sampling from the CVAE latent space and
+optionally applying sequential transformation chains to the latent samples.
+
+Follows the theory: v'_i = T_n(...T_2(T_1(v_i, eta_1), eta_2)..., eta_n)
+"""
+
+from typing import Optional
+import torch
+import torch.nn as nn
+from sklearn.preprocessing import MinMaxScaler
 import numpy as np
 from lgta.feature_engineering.feature_transformations import detemporalize
 from lgta.transformations.manipulate_data import ManipulateData
 
 
 def generate_new_time_series(
-    cvae: keras.Model,
+    cvae: nn.Module,
     z_mean: np.ndarray,
     z_log_var: np.ndarray,
     window_size: int,
-    dynamic_features_inp: List[np.ndarray],
-    scaler_target: object,
+    dynamic_features_inp: np.ndarray,
+    scaler_target: MinMaxScaler,
     n_features: int,
     n: int,
-    transformation: Optional[str] = None,
-    transf_param: float = 0.5,
+    transformations: Optional[list[str]] = None,
+    transf_params: Optional[list[float]] = None,
+    device: Optional[torch.device] = None,
 ) -> np.ndarray:
     """
-    Generate a new time series using a trained Conditional Variational Autoencoder (CVAE) model.
-
-    This function starts by sampling the first point of the series from the latent space. Then,
-    it generates the rest of the series using the trained CVAE model. If a transformation is specified,
-    it is applied to the standard deviation of the latent space before sampling.
+    Generate new time series by sampling per-timestep latent variables from
+    the CVAE and optionally applying a chain of transformations.
 
     Args:
-        cvae (keras.Model): A trained CVAE model to use for series generation.
-        z_mean (np.ndarray): Mean of the latent space Gaussian distribution for each series.
-        z_log_var (np.ndarray): Logarithm of the variance of the latent space Gaussian distribution for each series.
-        window_size (int): Size of the rolling window used in the series generation.
-        dynamic_features_inp (List[np.ndarray]): List of dynamic features to be inputted to the model.
-        scaler_target (object): A scaler object, trained on the training data, used for inverse transformations.
-        n_features (int): Number of input features.
-        n (int): Number of time points in the series to be generated.
-        transformation (str, optional): Name of the transformation to apply to the standard deviation of the latent space.
-                                        If None, no transformation is applied.
-        transf_param (float, optional): Parameter for the transformation. Default is 0.5.
+        cvae: A trained CVAE model.
+        z_mean: Mean of latent distributions, shape (n_windows, window_size, latent_dim).
+        z_log_var: Log-variance of latent distributions, same shape.
+        window_size: Size of the rolling window.
+        dynamic_features_inp: Dynamic features, shape (n_windows, window_size, n_dyn_features).
+        scaler_target: Fitted scaler for inverse-transforming predictions.
+        n_features: Number of output features.
+        n: Total number of time points.
+        transformations: List of transformation names to chain on latent samples.
+        transf_params: Corresponding parameters for each transformation.
+        device: Torch device for inference.
 
     Returns:
-        np.ndarray: Generated series of shape (n - window_size, n_features).
+        Generated time series of shape (n, n_features).
     """
-    latent_dim = z_mean.shape[-1]  # Get the latent dimension from the z_mean shape
-    z_std = np.exp(z_log_var * 0.5)
+    if device is None:
+        device = torch.device("cpu")
 
-    if transformation is not None:
-        z_std = np.clip(
-            ManipulateData(
-                x=z_std, transformation=transformation, parameters=[transf_param]
-            ).apply_transf(),
-            0,
-            None,
-        )
+    latent_dim = z_mean.shape[-1]
+    z_std = np.exp(z_log_var * 0.5)
 
     dec_pred = []
 
-    for id_seq in range(n - window_size + 1):
-        # Sample from a multivariate normal distribution for each series
-        z_sample = np.random.normal(z_mean[id_seq], z_std[id_seq], size=(latent_dim,))
+    cvae.eval()
+    with torch.no_grad():
+        for id_seq in range(n - window_size + 1):
+            v = np.random.normal(z_mean[id_seq], z_std[id_seq])
 
-        d_feat = [dy[id_seq, :].reshape(1, window_size) for dy in dynamic_features_inp]
-        dec_pred.append(cvae.decoder.predict([z_sample.reshape(1, latent_dim), d_feat]))
+            if transformations is not None:
+                for transformation, param in zip(transformations, transf_params):
+                    v = ManipulateData(
+                        x=v, transformation=transformation, parameters=[param]
+                    ).apply_transf()
+
+            d_feat = dynamic_features_inp[id_seq : id_seq + 1, :, :]
+            v_tensor = torch.tensor(
+                v.reshape(1, window_size, latent_dim),
+                dtype=torch.float32,
+                device=device,
+            )
+            d_tensor = torch.tensor(d_feat, dtype=torch.float32, device=device)
+
+            pred = cvae.decoder(v_tensor, d_tensor)
+            dec_pred.append(pred.cpu().numpy())
 
     dec_pred_hat = detemporalize(np.squeeze(np.array(dec_pred)), window_size)
     dec_pred_hat = scaler_target.inverse_transform(dec_pred_hat)

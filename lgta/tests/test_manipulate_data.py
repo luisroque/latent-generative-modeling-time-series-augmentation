@@ -8,18 +8,15 @@ class TestCreateTransformedDatasets(unittest.TestCase):
 
     def setUp(self):
         self.dataset = "tourism"
-        self.parameters = {
-            "jitter": 0.5,
-            "scaling": 0.2,
-            "magnitude_warp": 0.2,
-            "time_warp": 0.2,
-        }
-        self.params = np.vectorize(self.parameters.get)(list(self.parameters.keys()))
+        self.sigma_magnitude_warp = 0.2
+        self.sigma_time_warp = 0.2
         np.random.seed(0)
         self.data = np.random.randn(200, 100)
 
     def test_magnitude_warping_individual_series(self):
-        res = ManipulateData(self.data, "magnitude_warp", self.params).apply_transf()
+        res = ManipulateData(
+            self.data, "magnitude_warp", [self.sigma_magnitude_warp]
+        ).apply_transf()
 
         random_warp_1 = np.array(
             [0.999904, 0.76587626, 0.92712345, 0.69992099, 0.87777622, 1.12951142]
@@ -32,7 +29,9 @@ class TestCreateTransformedDatasets(unittest.TestCase):
         self.assertIsNone(np.testing.assert_almost_equal(res_1, res[:, 1]))
 
     def test_time_warping_individual_series(self):
-        res = ManipulateData(self.data, "time_warp", self.params).apply_transf()
+        res = ManipulateData(
+            self.data, "time_warp", [self.sigma_time_warp]
+        ).apply_transf()
 
         random_warp_1 = np.array(
             [0.999904, 0.76587626, 0.92712345, 0.69992099, 0.87777622, 1.12951142]

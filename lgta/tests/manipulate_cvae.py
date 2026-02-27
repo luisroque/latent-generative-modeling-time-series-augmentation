@@ -19,11 +19,10 @@ class TestModel(unittest.TestCase):
         """
         self.dataset_name = "prison"
         self.freq = "Q"
-        self.dynamic_feat_trig = False
+
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
             dataset_name=self.dataset_name,
             freq=self.freq,
-            dynamic_feat_trig=self.dynamic_feat_trig,
         )
         self.epochs = 5
         self.load_weights = True

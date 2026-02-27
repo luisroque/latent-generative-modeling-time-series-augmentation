@@ -1,0 +1,84 @@
+\section{Evaluation Framework}
+\label{sec:evaluation}
+
+We propose a comprehensive evaluation framework for time series augmentation that addresses a critical challenge: preventing trivial solutions (e.g., copying original data) that achieve high realism scores but provide no practical value. Our framework evaluates augmentation quality across six complementary dimensions using rigorous statistical testing.
+
+\subsection{Evaluation Metrics}
+
+Our framework evaluates augmentation quality across six complementary dimensions:
+
+\paragraph{Realism.} These metrics assess whether augmented series maintain the distributional properties of original data:
+\begin{itemize}
+    \item \textbf{Wasserstein Distance}: Measures the optimal transport distance between distributions (lower is better).
+    \item \textbf{Kolmogorov-Smirnov Test}: Non-parametric test for distribution similarity (higher $p$-values indicate indistinguishable distributions).
+    \item \textbf{Moment Preservation}: Quantifies preservation of mean, standard deviation, skewness, and kurtosis through relative errors (lower is better).
+\end{itemize}
+
+\paragraph{Novelty.} These metrics prevent degenerate solutions by ensuring augmented data is genuinely novel rather than memorized. Without these metrics, simply copying the dataset would score perfectly on realism but provide zero augmentation value.
+\begin{itemize}
+    \item \textbf{Minimum Distance to Originals}: Computes the minimum distance from each augmented series to any original series in standardized space. Higher values indicate novelty; near-zero suggests memorization.
+    \item \textbf{Duplication Ratio}: Proportion of augmented series that are near-duplicates (distance $< 0.01$) of original series. Lower is better; $\rho_{\text{dup}} > 0.5$ indicates degenerate copying.
+    \item \textbf{Internal Diversity}: Average pairwise distance between augmented series. Higher values indicate diversity; near-zero suggests mode collapse.
+    \item \textbf{Novelty Score}: Combined metric $S_{\text{nov}} = 0.5 \cdot \bar{d}_{\min} + 0.5 \cdot D_{\text{int}}$ balancing distance from originals and internal diversity (higher is better).
+\end{itemize}
+
+\paragraph{Diversity.} 
+\begin{itemize}
+    \item \textbf{Latent Space Coverage}: Measures how well augmented data covers the principal component space of original data. We compute the proportion of augmented samples falling within the range (with 10\% margin) of original data across the top 10 principal components. Values close to 1.0 indicate comprehensive coverage.
+\end{itemize}
+
+\paragraph{Statistical Consistency.} These metrics ensure fundamental time series properties are preserved:
+\begin{itemize}
+    \item \textbf{Autocorrelation Preservation}: Mean absolute error between autocorrelation functions across 20 lags. Lower errors indicate better temporal dependency preservation.
+    \item \textbf{Spectral Similarity}: Root mean squared error between power spectral densities computed via Welch's method. Lower distances indicate better frequency domain preservation.
+    \item \textbf{Trend Preservation}: Correlation between smoothed trends using 10-period moving averages. Higher correlations indicate better long-term trend preservation.
+\end{itemize}
+
+\paragraph{Smoothness.} 
+\begin{itemize}
+    \item \textbf{Temporal Smoothness Ratios}: Ratios of first-order and second-order differences between augmented and original data. Values close to 1.0 indicate similar smoothness characteristics, avoiding artificial discontinuities.
+\end{itemize}
+
+\paragraph{Downstream Utility.}
+\begin{itemize}
+    \item \textbf{Train on Synthetic, Test on Real (TSTR)}: Train forecasting models on augmented data and evaluate on held-out real data using Mean Squared Error (MSE). Lower MSE indicates augmented data better captures patterns useful for prediction \citep{esteban2017real}.
+\end{itemize}
+
+\subsection{Statistical Testing Protocol}
+\label{subsec:statistical_testing}
+
+To ensure robust comparisons, we employ a rigorous experimental protocol:
+
+\begin{enumerate}
+    \item \textbf{Multiple Runs}: Each evaluation is repeated $n=10$ times with different random seeds to ensure statistical robustness.
+    
+    \item \textbf{Three Complementary Tests}: For each metric, we apply (i) paired t-test (parametric), (ii) Wilcoxon signed-rank test (non-parametric), and (iii) bootstrap test (distribution-free with 1,000 resamples). We use majority voting across tests at significance level $\alpha = 0.05$.
+    
+    \item \textbf{Effect Size Reporting}: We report Cohen's $d$ (for t-tests) and rank-biserial correlation (for Wilcoxon) to quantify practical significance.
+    
+    \item \textbf{Category-Level Assessment}: We aggregate winners within each of the six metric categories to determine category-level performance.
+    
+    \item \textbf{Overall Winner}: Determined by majority of metrics won across all categories.
+\end{enumerate}
+
+\subsection{Framework Completeness}
+\label{subsec:completeness}
+
+This framework provides comprehensive augmentation assessment through:
+
+\begin{itemize}
+    \item \textbf{Multi-Dimensional Coverage}: Six complementary dimensions capture different quality facets. Methods must excel across multiple dimensions rather than optimizing single metrics.
+    
+    \item \textbf{Prevention of Trivial Solutions}: Novelty metrics explicitly detect degenerate solutions. Copying original data achieves perfect realism but fails novelty (high duplication ratio, near-zero distance to originals), exposing it as valueless.
+    
+    \item \textbf{Time Series Specificity}: Unlike generic metrics, our framework includes time series-specific evaluations (autocorrelation, spectral analysis, trend preservation) essential for temporal data.
+    
+    \item \textbf{Statistical Rigor}: Multiple hypothesis tests with majority voting reduce false positives while effect sizes ensure practical significance.
+    
+    \item \textbf{Downstream Validation}: TSTR evaluation provides the ultimate test—whether augmentation improves real modeling tasks.
+    
+    \item \textbf{Balanced Trade-offs}: The framework measures inherent trade-offs (e.g., realism vs.\ novelty). Methods achieving optimal balance across competing objectives emerge as superior.
+\end{itemize}
+
+This evaluation framework ensures methods are assessed on holistic criteria reflecting real-world augmentation requirements rather than single metrics that can be gamed.
+

@@ -110,13 +110,12 @@ class CreateTransformedVersions:
         params = self._get_parameters_map(self.transformations)
         j = 0
         for k in range(len(self.transformations)):
-            # Create versions and samples per transformation
             for i in range(1, n_versions + 1):
-                # Create 6 different versions of a dataset
                 for j in range(1, self.n_samples + 1):
-                    # Create 10 samples of each version
                     y_new[k, i - 1, j - 1] = ManipulateData(
-                        self.y, self.transformations[k], parameters=params * i
+                        self.y,
+                        self.transformations[k],
+                        parameters=[params[k] * i],
                     ).apply_transf()
                 if save:
                     self._save_version_file(

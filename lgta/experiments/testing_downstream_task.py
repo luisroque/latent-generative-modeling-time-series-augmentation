@@ -1,5 +1,13 @@
+"""
+Downstream task experiment: trains an LSTM forecaster on original data,
+original+augmented (L-GTA), and original+benchmark-augmented data to
+compare MSE performance.
+"""
+
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
@@ -10,7 +18,7 @@ from lgta.model.generate_data import generate_datasets
 
 SEED = 42
 np.random.seed(SEED)
-tf.random.set_seed(SEED)
+torch.manual_seed(SEED)
 
 dataset = "tourism"
 freq = "M"
@@ -42,7 +50,7 @@ transformations = [
 ]
 
 create_dataset_vae = CreateTransformedVersionsCVAE(
-    dataset_name=dataset, freq=freq, top=top, dynamic_feat_trig=False
+    dataset_name=dataset, freq=freq, top=top
 )
 
 model, _, _ = create_dataset_vae.fit()
@@ -51,12 +59,79 @@ X_hat, z, _, _ = create_dataset_vae.predict(model)
 X_orig = create_dataset_vae.X_train_raw
 
 
+def _get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def prepare_rnn_data(data, window_size):
     X, y = [], []
     for i in range(len(data) - window_size):
         X.append(data[i : i + window_size])
         y.append(data[i + window_size])
     return np.array(X), np.array(y)
+
+
+class DownstreamLSTM(nn.Module):
+    """Two-layer LSTM forecaster for the downstream evaluation task."""
+
+    def __init__(self, input_size: int, output_dim: int):
+        super().__init__()
+        self.lstm1 = nn.LSTM(
+            input_size=input_size, hidden_size=128, batch_first=True
+        )
+        self.lstm2 = nn.LSTM(
+            input_size=128, hidden_size=64, batch_first=True
+        )
+        self.fc = nn.Linear(64, output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.lstm1(x)
+        out = torch.relu(out)
+        out, _ = self.lstm2(out)
+        out = torch.relu(out[:, -1, :])
+        return self.fc(out)
+
+
+def build_rnn(input_shape, output_dim):
+    input_size = input_shape[1]
+    return DownstreamLSTM(input_size, output_dim)
+
+
+def train_and_evaluate_rnn(input_shape, X_train, y_train, X_test, y_test, num_runs=5):
+    device = _get_device()
+    results = []
+    for _ in range(num_runs):
+        rnn = build_rnn(input_shape, y_train.shape[1]).to(device)
+        optimizer = torch.optim.Adam(rnn.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+
+        train_ds = TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32),
+        )
+        loader = DataLoader(train_ds, batch_size=32, shuffle=False)
+
+        rnn.train()
+        for _ in range(200):
+            for bx, by in loader:
+                bx, by = bx.to(device), by.to(device)
+                optimizer.zero_grad()
+                loss = criterion(rnn(bx), by)
+                loss.backward()
+                optimizer.step()
+
+        rnn.eval()
+        with torch.no_grad():
+            y_pred = rnn(
+                torch.tensor(X_test, dtype=torch.float32, device=device)
+            ).cpu().numpy()
+        mse = mean_squared_error(y_test, y_pred)
+        results.append(mse)
+    return np.median(results), np.std(results)
 
 
 window_size = 12
@@ -70,38 +145,6 @@ X_train_orig, X_test_orig, y_train_orig, y_test_orig = train_test_split(
 X_train_comb, X_test_comb, y_train_comb, y_test_comb = train_test_split(
     X_combined_rnn, y_combined_rnn, test_size=0.1, random_state=SEED, shuffle=False
 )
-
-
-def build_rnn(input_shape, output_dim):
-    model = tf.keras.Sequential(
-        [
-            tf.keras.layers.LSTM(
-                128,
-                activation="relu",
-                return_sequences=True,
-                input_shape=input_shape,
-            ),
-            tf.keras.layers.LSTM(
-                64,
-                activation="relu",
-                return_sequences=False,
-            ),
-            tf.keras.layers.Dense(output_dim),
-        ]
-    )
-    model.compile(optimizer="adam", loss="mse", metrics=["mae"])
-    return model
-
-
-def train_and_evaluate_rnn(input_shape, X_train, y_train, X_test, y_test, num_runs=5):
-    results = []
-    for _ in range(num_runs):
-        rnn = build_rnn(input_shape, y_train.shape[1])
-        rnn.fit(X_train, y_train, epochs=200, batch_size=32, verbose=0)
-        y_pred = rnn.predict(X_test)
-        mse = mean_squared_error(y_test, y_pred)
-        results.append(mse)
-    return np.median(results), np.std(results)
 
 
 results_summary = []

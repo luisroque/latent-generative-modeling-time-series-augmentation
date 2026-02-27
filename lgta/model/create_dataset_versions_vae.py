@@ -1,12 +1,16 @@
+"""
+Training pipeline for the CVAE model. Handles data preprocessing, model fitting,
+prediction, and generation of transformed time series datasets.
+"""
+
 import os
 import numpy as np
 import pandas as pd
+import torch
+from torch.utils.data import Dataset as TorchDataset, DataLoader
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, Union
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow import keras
-import tensorflow as tf
-from keras.callbacks import EarlyStopping, ModelCheckpoint
 from lgta.model.models import CVAE, get_CVAE
 from lgta.feature_engineering.static_features import (
     create_static_features,
@@ -33,6 +37,52 @@ class InvalidFrequencyError(Exception):
     pass
 
 
+class TimeSeriesDataset(TorchDataset):
+    """PyTorch Dataset wrapping dynamic features and input data tensors."""
+
+    def __init__(
+        self, dynamic_features: np.ndarray, input_data: np.ndarray
+    ):
+        self.dynamic_features = torch.tensor(
+            dynamic_features, dtype=torch.float32
+        )
+        self.input_data = torch.tensor(input_data, dtype=torch.float32)
+
+    def __len__(self) -> int:
+        return len(self.input_data)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.dynamic_features[idx], self.input_data[idx]
+
+
+def _get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _normalize_transformations(
+    transformation: Optional[Union[str, list[str]]],
+    transf_param: Union[float, list[float]],
+) -> tuple[Optional[list[str]], Optional[list[float]]]:
+    """Convert single transformation/param to lists for uniform chaining logic."""
+    if transformation is None:
+        return None, None
+    if isinstance(transformation, str):
+        transformations = [transformation]
+        transf_params = (
+            [transf_param] if isinstance(transf_param, (int, float)) else transf_param
+        )
+    else:
+        transformations = transformation
+        transf_params = (
+            transf_param if isinstance(transf_param, list) else [transf_param]
+        )
+    return transformations, transf_params
+
+
 class CreateTransformedVersionsCVAE:
     """
     Class for creating transformed versions of the dataset using a Conditional Variational Autoencoder (CVAE).
@@ -51,8 +101,6 @@ class CreateTransformedVersionsCVAE:
         window_size: Window size for the sliding window. Defaults to 10.
         weekly_m5: If True, use the M5 competition's weekly grouping. Defaults to True.
         test_size: Size of the test set. If None, the size is determined automatically. Defaults to None.
-        dynamic_feat_trig: If True, apply dynamic feature transformation. Defaults to True.
-
         Below are parameters for the synthetic data creation:
             num_base_series_time_points: Number of base time points in the series. Defaults to 100.
             num_latent_dim: Dimension of the latent space. Defaults to 3.
@@ -64,9 +112,6 @@ class CreateTransformedVersionsCVAE:
     _instance = None
 
     def __new__(cls, *args, **kwargs) -> "CreateTransformedVersionsCVAE":
-        """
-        Override the __new__ method to implement the Singleton design pattern.
-        """
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
@@ -81,7 +126,6 @@ class CreateTransformedVersionsCVAE:
         window_size: int = 10,
         weekly_m5: bool = True,
         test_size: int = None,
-        dynamic_feat_trig: bool = True,
         num_base_series_time_points: int = 100,
         num_latent_dim: int = 3,
         num_variants: int = 20,
@@ -94,7 +138,6 @@ class CreateTransformedVersionsCVAE:
         self.freq = freq
         self.top = top
         self.test_size = test_size
-        self.dynamic_feat_trig = dynamic_feat_trig
         self.weekly_m5 = weekly_m5
         self.num_base_series_time_points = num_base_series_time_points
         self.num_latent_dim = num_latent_dim
@@ -116,18 +159,15 @@ class CreateTransformedVersionsCVAE:
             [self.df, pd.DataFrame(self.dataset["dates"], columns=["Date"])], axis=1
         )[: self.n]
         self.df = self.df.set_index("Date")
-        self.df.asfreq(self.freq)
         self.preprocess_freq()
         self.input_data = None
-
-        self.features_input = (None, None, None)
+        self.device = _get_device()
         self._create_directories()
         self._save_original_file()
 
     def preprocess_freq(self):
         end_date = None
 
-        # Create dataset with window_size more dates in the future to be used
         if self.freq in ["Q", "QS"]:
             if self.freq == "Q":
                 self.freq += "S"
@@ -154,9 +194,6 @@ class CreateTransformedVersionsCVAE:
         self.df_generate = self.df_generate.reindex(ix)
 
     def _get_dataset(self):
-        """
-        Get dataset and apply preprocessing
-        """
         ppc_args = {
             "dataset": self.dataset_name,
             "freq": self.freq,
@@ -172,23 +209,16 @@ class CreateTransformedVersionsCVAE:
         }
 
         dataset = ppc(**ppc_args).apply_preprocess()
-
         return dataset
 
     def _create_directories(self):
-        """
-        Create dynamically the directories to store the data if they don't exist
-        """
-        # Create directory to store transformed datasets if does not exist
         Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
         Path(f"{self.input_dir}assets/data/transformed_datasets").mkdir(
             parents=True, exist_ok=True
         )
+        Path(f"{self.input_dir}assets/model_weights").mkdir(parents=True, exist_ok=True)
 
     def _save_original_file(self):
-        """
-        Store original dataset
-        """
         with open(
             f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
             "wb",
@@ -203,14 +233,6 @@ class CreateTransformedVersionsCVAE:
         transformation: str,
         method: str = "single_transf",
     ) -> None:
-        """
-        Store the transformed dataset
-
-        :param y_new: transformed data
-        :param version: version of the transformation
-        :param sample: sample of the transformation
-        :param transformation: name of the transformation applied
-        """
         with open(
             f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
             "wb",
@@ -218,18 +240,15 @@ class CreateTransformedVersionsCVAE:
             np.save(f, y_new)
 
     def _generate_static_features(self, n: int) -> None:
-        """Helper method to create the static feature and scale them
-
-        Args:
-            n: number of samples
-        """
         self.static_features = create_static_features(self.groups, self.dataset)
 
-    def _feature_engineering(self, n: int) -> tf.data.Dataset:
-        """Create static and dynamic features as well as apply preprocess to raw time series
+    def _feature_engineering(
+        self, n: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Create static and dynamic features as well as apply preprocess to raw time series.
 
-        Args:
-            n: number of samples
+        Returns:
+            Tuple of (dynamic_features_inp, X_inp) as numpy arrays.
         """
         self.X_train_raw = self.df.astype(np.float32).to_numpy()
 
@@ -237,8 +256,6 @@ class CreateTransformedVersionsCVAE:
         X_train_raw_scaled = self.scaler_target.transform(self.X_train_raw)
 
         if n == self.n:
-            # if we want to generate new time series with the same size
-            # as the original ones
             self.dynamic_features = create_dynamic_features(self.df_generate, self.freq)
         else:
             self.dynamic_features = create_dynamic_features(self.df, self.freq)
@@ -253,9 +270,8 @@ class CreateTransformedVersionsCVAE:
             self.window_size,
         )
 
-        dataset = tf.data.Dataset.from_tensor_slices((self.dynamic_features_inp, X_inp))
-        self.input_data = dataset
-        return dataset
+        self.input_data = (self.dynamic_features_inp, X_inp)
+        return self.dynamic_features_inp[0], X_inp[0]
 
     def fit(
         self,
@@ -266,23 +282,17 @@ class CreateTransformedVersionsCVAE:
         learning_rate: float = 0.001,
         hyper_tuning: bool = False,
         load_weights: bool = True,
-    ) -> tuple[CVAE, dict, EarlyStopping]:
+    ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
-        Training our CVAE on the dataset supplied
+        Training our CVAE on the dataset supplied.
 
-        :param epochs: number of epochs to train the model
-        :param batch_size: batch size to train the model
-        :param patience: parameter for early stopping
-        :param latent_dim: dimensionality of the normal dist
-                -> if = 1 univariate; if = n_features full multivariate
-
-        :return: model trained
+        Returns:
+            Tuple of (trained model, training history dict or None, best loss).
         """
-        dataset = self._feature_engineering(self.n_train)
+        dynamic_features_np, X_inp_np = self._feature_engineering(self.n_train)
 
-        for dynamic_features_inp, X_inp in dataset.take(1):
-            n_main_features = X_inp.shape[-1]
-            n_dyn_features = dynamic_features_inp.shape[-1]
+        n_main_features = X_inp_np.shape[-1]
+        n_dyn_features = dynamic_features_np.shape[-1]
 
         encoder, decoder = get_CVAE(
             window_size=self.window_size,
@@ -292,52 +302,94 @@ class CreateTransformedVersionsCVAE:
         )
 
         cvae = CVAE(encoder, decoder, self.window_size)
-        cvae.compile(optimizer=keras.optimizers.Adam(learning_rate=learning_rate))
+        cvae = cvae.to(self.device)
 
-        # Build the model by calling it on a batch of data
-        for batch in dataset.take(1):
-            _ = cvae(batch)
-        cvae.summary()
-
-        es = EarlyStopping(
-            patience=patience,
-            verbose=1,
-            monitor="loss",
-            mode="auto",
-            restore_best_weights=True,
-        )
-
-        weights_folder = "model_weights"
+        weights_folder = f"{self.input_dir}assets/model_weights"
         os.makedirs(weights_folder, exist_ok=True)
-
         weights_file = os.path.join(
-            weights_folder, f"{self.dataset_name}_vae_weights.h5"
+            weights_folder, f"{self.dataset_name}_vae_weights.pt"
         )
-        history = None
 
         if os.path.exists(weights_file) and not hyper_tuning and load_weights:
             print("Loading existing weights...")
-            cvae.load_weights(weights_file)
-        else:
-
-            mc = ModelCheckpoint(
-                weights_file,
-                save_best_only=True,
-                save_weights_only=True,
-                monitor="loss",
-                mode="auto",
-                verbose=1,
+            cvae.load_state_dict(
+                torch.load(weights_file, map_location=self.device, weights_only=True)
             )
+            return cvae, None, 0.0
 
-            history = cvae.fit(
-                x=dataset,
-                epochs=epochs,
-                batch_size=batch_size,
-                shuffle=False,
-                callbacks=[es, mc],
-            )
+        dataset = TimeSeriesDataset(dynamic_features_np, X_inp_np)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-        return cvae, history, es
+        optimizer = torch.optim.Adam(
+            cvae.parameters(), lr=learning_rate, weight_decay=0.001
+        )
+
+        history: dict[str, list[float]] = {
+            "loss": [],
+            "reconstruction_loss": [],
+            "kl_loss": [],
+        }
+
+        best_loss = float("inf")
+        epochs_no_improve = 0
+        best_state = None
+
+        total_params = sum(p.numel() for p in cvae.parameters())
+        trainable_params = sum(
+            p.numel() for p in cvae.parameters() if p.requires_grad
+        )
+        print(f"Total params: {total_params:,}")
+        print(f"Trainable params: {trainable_params:,}")
+
+        for epoch in range(epochs):
+            cvae.train()
+            epoch_loss = 0.0
+            epoch_recon = 0.0
+            epoch_kl = 0.0
+            n_batches = 0
+
+            for dyn_feat, x_inp in dataloader:
+                dyn_feat = dyn_feat.to(self.device)
+                x_inp = x_inp.to(self.device)
+
+                optimizer.zero_grad()
+                losses = cvae.compute_loss(dyn_feat, x_inp)
+                losses["loss"].backward()
+                optimizer.step()
+
+                epoch_loss += losses["loss"].item()
+                epoch_recon += losses["reconstruction_loss"].item()
+                epoch_kl += losses["kl_loss"].item()
+                n_batches += 1
+
+            avg_loss = epoch_loss / n_batches
+            avg_recon = epoch_recon / n_batches
+            avg_kl = epoch_kl / n_batches
+
+            history["loss"].append(avg_loss)
+            history["reconstruction_loss"].append(avg_recon)
+            history["kl_loss"].append(avg_kl)
+
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                epochs_no_improve = 0
+                best_state = {k: v.cpu().clone() for k, v in cvae.state_dict().items()}
+                torch.save(best_state, weights_file)
+                print(
+                    f"Epoch {epoch + 1}: loss improved to {avg_loss:.6f} - saving weights"
+                )
+            else:
+                epochs_no_improve += 1
+
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch + 1}")
+                break
+
+        if best_state is not None:
+            cvae.load_state_dict(best_state)
+            cvae = cvae.to(self.device)
+
+        return cvae, history, best_loss
 
     def predict(
         self, cvae: CVAE
@@ -345,84 +397,72 @@ class CreateTransformedVersionsCVAE:
         """
         Predict original time series using CVAE.
 
-        Args:
-            cvae: Trained CVAE model.
-
         Returns:
             Tuple containing the reconstructed time series (`X_hat_complete`),
             latent variables (`z`), mean of latent distribution (`z_mean`),
             and log variance of latent distribution (`z_log_var`).
         """
-        dataset = self._feature_engineering(self.n_train)
+        dynamic_features_np, X_inp_np = self._feature_engineering(self.n_train)
 
-        all_preds = []
-        all_z_mean = []
-        all_z_log_var = []
-        all_z = []
+        cvae.eval()
+        with torch.no_grad():
+            dyn_tensor = torch.tensor(
+                dynamic_features_np, dtype=torch.float32, device=self.device
+            )
+            x_tensor = torch.tensor(
+                X_inp_np, dtype=torch.float32, device=self.device
+            )
 
-        for dynamic_feat, X_inp in dataset:
-            z_mean, z_log_var, z = cvae.encoder.predict([dynamic_feat, X_inp])
-            preds = cvae.decoder.predict([z, dynamic_feat])
+            z_mean, z_log_var, z = cvae.encoder(dyn_tensor, x_tensor)
+            preds = cvae.decoder(z, dyn_tensor)
 
-            all_preds.append(preds)
-            all_z_mean.append(z_mean)
-            all_z_log_var.append(z_log_var)
-            all_z.append(z)
+            preds = preds.cpu().numpy()
+            z_mean = z_mean.cpu().numpy()
+            z_log_var = z_log_var.cpu().numpy()
+            z = z.cpu().numpy()
 
-        all_preds = np.concatenate(all_preds, axis=0)
-        all_z_mean = np.concatenate(all_z_mean, axis=0)
-        all_z_log_var = np.concatenate(all_z_log_var, axis=0)
-        all_z = np.concatenate(all_z, axis=0)
-
-        preds = detemporalize(all_preds, self.window_size)
-
+        preds = detemporalize(preds, self.window_size)
         X_hat = self.scaler_target.inverse_transform(preds)
-
         X_hat_complete = np.concatenate(
             (self.X_train_raw[: self.window_size], X_hat), axis=0
         )
 
-        return X_hat_complete, all_z, all_z_mean, all_z_log_var
+        return X_hat_complete, z, z_mean, z_log_var
 
     def generate_transformed_time_series(
         self,
         cvae: CVAE,
         z_mean: np.ndarray,
         z_log_var: np.ndarray,
-        transformation: Optional[str] = None,
-        transf_param: float = 0.5,
+        transformation: Optional[Union[str, list[str]]] = None,
+        transf_param: Union[float, list[float]] = 0.5,
         plot_predictions: bool = True,
         n_series_plot: int = 8,
     ) -> np.ndarray:
         """
-        Generate new time series by sampling from the latent space of a Conditional Variational Autoencoder (CVAE).
+        Generate new time series by sampling from the CVAE latent space.
 
-        Args:
-            cvae: A trained Conditional Variational Autoencoder (CVAE) model.
-            z_mean: Mean parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            z_log_var: Log variance parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            transformation: Transformation to apply to the data, if any.
-            transf_param: Parameter for the transformation.
-            plot_predictions: If True, plots examples of generated series versus original and stores in a PDF.
-            n_series_plot: Number of series to plot.
-
-        Returns:
-            A new generated dataset (time series).
+        Supports sequential chaining of transformations on latent samples:
+        v' = T_n(...T_2(T_1(v, eta_1), eta_2)..., eta_n)
         """
-        self.features_input = self._feature_engineering(self.n)
-        dynamic_feat, X_inp = self.features_input
+        self._feature_engineering(self.n)
+
+        transformations, transf_params = _normalize_transformations(
+            transformation, transf_param
+        )
 
         dec_pred_hat = generate_new_time_series(
             cvae=cvae,
             z_mean=z_mean,
             z_log_var=z_log_var,
             window_size=self.window_size,
-            dynamic_features_inp=dynamic_feat,
+            dynamic_features_inp=self.dynamic_features_inp[0],
             scaler_target=self.scaler_target,
             n_features=self.n_features,
             n=self.n,
-            transformation=transformation,
-            transf_param=transf_param,
+            transformations=transformations,
+            transf_params=transf_params,
+            device=self.device,
         )
 
         if plot_predictions:
@@ -443,26 +483,13 @@ class CreateTransformedVersionsCVAE:
         z_mean: np.ndarray,
         z_log_var: np.ndarray,
         transformation: Optional[str] = None,
-        transf_param: List[float] = None,
+        transf_param: list[float] = None,
         n_versions: int = 6,
         n_samples: int = 10,
         save: bool = True,
     ) -> np.ndarray:
         """
-        Generate new datasets using the CVAE trained model and different samples from its latent space.
-
-        Args:
-            cvae: A trained Conditional Variational Autoencoder (CVAE) model.
-            z_mean: Mean parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            z_log_var: Log variance parameters of the latent space distribution (Gaussian). Shape: [num_samples, window_size].
-            transformation: Transformation to apply to the data, if any.
-            transf_param: Parameter for the transformation.
-            n_versions: Number of versions of the dataset to create.
-            n_samples: Number of samples of the dataset to create.
-            save: If True, the generated datasets are stored locally.
-
-        Returns:
-            An array containing the new generated datasets.
+        Generate multiple dataset versions using different transformation magnitudes.
         """
         if transf_param is None:
             transf_param = [0.5, 2, 4, 10, 20, 50]
