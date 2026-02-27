@@ -249,6 +249,9 @@ class CreateTransformedVersionsCVAE:
             self.window_size,
         )
 
+        if not getattr(self, "use_dynamic_features", True):
+            self.dynamic_features_inp = [np.zeros_like(self.dynamic_features_inp[0])]
+
         self.input_data = (self.dynamic_features_inp, X_inp)
         return self.dynamic_features_inp[0], X_inp[0]
 
@@ -257,12 +260,15 @@ class CreateTransformedVersionsCVAE:
         epochs: int = 1000,
         batch_size: int = 5,
         patience: int = 30,
-        latent_dim: int = 8,
+        latent_dim: int = 16,
         learning_rate: float = 0.001,
         hyper_tuning: bool = False,
         load_weights: bool = True,
         kl_anneal_epochs: int = 100,
         kl_weight_max: float = 1.0,
+        free_bits: float = 0.5,
+        grad_clip_norm: float = 1.0,
+        use_dynamic_features: bool = False,
     ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
         Training our CVAE on the dataset supplied.
@@ -270,6 +276,7 @@ class CreateTransformedVersionsCVAE:
         Returns:
             Tuple of (trained model, training history dict or None, best loss).
         """
+        self.use_dynamic_features = use_dynamic_features
         dynamic_features_np, X_inp_np = self._feature_engineering(self.n_train)
 
         n_main_features = X_inp_np.shape[-1]
@@ -282,7 +289,10 @@ class CreateTransformedVersionsCVAE:
             latent_dim=latent_dim,
         )
 
-        cvae = CVAE(encoder, decoder, self.window_size, kl_weight=0.0)
+        cvae = CVAE(
+            encoder, decoder, self.window_size,
+            kl_weight=0.0, free_bits=free_bits,
+        )
         cvae = cvae.to(self.device)
 
         weights_folder = f"{self.input_dir}assets/model_weights"
@@ -307,7 +317,7 @@ class CreateTransformedVersionsCVAE:
                 )
 
         dataset = TimeSeriesDataset(dynamic_features_np, X_inp_np)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         optimizer = torch.optim.Adam(
             cvae.parameters(), lr=learning_rate, weight_decay=0.001
@@ -348,6 +358,9 @@ class CreateTransformedVersionsCVAE:
                 optimizer.zero_grad()
                 losses = cvae.compute_loss(dyn_feat, x_inp)
                 losses["loss"].backward()
+                torch.nn.utils.clip_grad_norm_(
+                    cvae.parameters(), max_norm=grad_clip_norm
+                )
                 optimizer.step()
 
                 epoch_loss += losses["loss"].item()
@@ -364,8 +377,8 @@ class CreateTransformedVersionsCVAE:
             history["kl_loss"].append(avg_kl)
             history["kl_weight"].append(kl_weight)
 
-            if avg_recon < best_loss:
-                best_loss = avg_recon
+            if avg_loss < best_loss:
+                best_loss = avg_loss
                 epochs_no_improve = 0
                 best_state = {k: v.cpu().clone() for k, v in cvae.state_dict().items()}
                 torch.save(best_state, weights_file)
@@ -374,7 +387,7 @@ class CreateTransformedVersionsCVAE:
                     f"(recon={avg_recon:.6f}, kl={avg_kl:.6f}, "
                     f"kl_w={kl_weight:.4f}) - saving weights"
                 )
-            else:
+            elif epoch >= kl_anneal_epochs:
                 epochs_no_improve += 1
 
             if epochs_no_improve >= patience:

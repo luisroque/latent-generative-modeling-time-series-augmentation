@@ -1,9 +1,12 @@
 """
 L-GTA model architecture: Conditional Variational Autoencoder (CVAE) with
-Bi-LSTM encoder/decoder and Variational Multi-Head Attention (VMHA).
+Bi-LSTM encoder/decoder and attention-based conditioning on dynamic features.
 
 Encoder: Bi-LSTM(z) -> h_t, then VMHA(h_t, c) -> phi -> (mu_t, Sigma_t) -> v_t
-Decoder: Bi-LSTM(v_t, c) -> psi(y_t) -> z_tilde_t
+Decoder: Bi-LSTM(v_t) -> cross_attn(dec, c) -> psi(y_t) -> z_tilde_t
+
+Free bits (Kingma et al. 2016) enforces a per-dimension minimum KL to prevent
+posterior collapse when dynamic features provide a reconstruction shortcut.
 """
 
 import torch
@@ -162,7 +165,12 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Bi-LSTM decoder that reconstructs time series from latent + condition."""
+    """Bi-LSTM decoder with cross-attention conditioning on dynamic features.
+
+    The LSTM processes latent z alone, then cross-attention integrates dynamic
+    features — symmetric with the encoder's VMHA conditioning and removing the
+    direct-concatenation shortcut that caused posterior collapse.
+    """
 
     def __init__(
         self,
@@ -170,29 +178,42 @@ class Decoder(nn.Module):
         n_main_features: int,
         n_dyn_features: int,
         latent_dim: int,
+        num_heads: int = 8,
+        rate: float = 0.3,
     ):
         super().__init__()
         self.lstm = nn.LSTM(
-            input_size=latent_dim + n_dyn_features,
+            input_size=latent_dim,
             hidden_size=n_main_features,
             batch_first=True,
             bidirectional=True,
         )
+
+        self.c_proj = nn.Linear(n_dyn_features, n_main_features)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=n_main_features, num_heads=num_heads, batch_first=True
+        )
+        self.ln_cross = nn.LayerNorm(n_main_features, eps=1e-6)
+        self.drop_cross = nn.Dropout(rate)
+
         self.output_layer = nn.Linear(n_main_features, n_main_features)
         self._init_weights()
 
     def _init_weights(self) -> None:
+        nn.init.xavier_uniform_(self.c_proj.weight)
         nn.init.xavier_uniform_(self.output_layer.weight)
 
     def forward(
         self, z: torch.Tensor, dyn_inp: torch.Tensor
     ) -> torch.Tensor:
-        dec = torch.cat([z, dyn_inp], dim=-1)
-
-        dec, _ = self.lstm(dec)
-        # Average forward and backward directions (merge_mode="ave")
+        dec, _ = self.lstm(z)
         hidden_size = dec.shape[-1] // 2
         dec = (dec[:, :, :hidden_size] + dec[:, :, hidden_size:]) / 2.0
+
+        c_proj = self.c_proj(dyn_inp)
+        cross_out, _ = self.cross_attn(query=dec, key=c_proj, value=c_proj)
+        cross_out = self.drop_cross(cross_out)
+        dec = self.ln_cross(dec + cross_out)
 
         return self.output_layer(dec)
 
@@ -206,12 +227,14 @@ class CVAE(nn.Module):
         decoder: Decoder,
         window_size: int,
         kl_weight: float = 1.0,
+        free_bits: float = 0.0,
     ) -> None:
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.window_size = window_size
         self.kl_weight = kl_weight
+        self.free_bits = free_bits
 
     def forward(
         self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
@@ -226,8 +249,11 @@ class CVAE(nn.Module):
         pred = self.decoder(z, dynamic_features)
 
         reconstruction_loss = torch.mean((inp_data - pred) ** 2)
-        kl_loss = -0.5 * (1 + z_log_var - z_mean.pow(2) - z_log_var.exp())
-        kl_loss = kl_loss.sum(dim=[1, 2]).mean()
+        kl_per_element = -0.5 * (
+            1 + z_log_var - z_mean.pow(2) - z_log_var.exp()
+        )
+        kl_per_dim = kl_per_element.sum(dim=1).mean(dim=0)
+        kl_loss = torch.clamp(kl_per_dim, min=self.free_bits).sum()
         total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
         return {
@@ -267,5 +293,6 @@ def get_CVAE(
         n_main_features=n_main_features,
         n_dyn_features=n_dyn_features,
         latent_dim=latent_dim,
+        num_heads=num_heads,
     )
     return encoder, decoder

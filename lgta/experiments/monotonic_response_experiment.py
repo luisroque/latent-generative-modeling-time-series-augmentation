@@ -34,8 +34,9 @@ class SweepConfig:
     load_weights: bool = True
     series_to_plot: int = 0
     epochs: int = 1000
-    latent_dim: int = 8
+    latent_dim: int = 16
     kl_anneal_epochs: int = 100
+    use_dynamic_features: bool = True
     output_dir: Path = field(
         default_factory=lambda: Path("assets/results/monotonic_response")
     )
@@ -96,6 +97,7 @@ def run_sweep(config: SweepConfig) -> SweepResults:
         latent_dim=config.latent_dim,
         kl_anneal_epochs=config.kl_anneal_epochs,
         load_weights=config.load_weights,
+        use_dynamic_features=config.use_dynamic_features,
     )
     _, z, z_mean, z_log_var = vae_creator.predict(model)
     X_orig = vae_creator.X_train_raw
@@ -286,7 +288,7 @@ if __name__ == "__main__":
     synthetic_config = SweepConfig(
         dataset_name="synthetic",
         freq="D",
-        latent_dim=8,
+        latent_dim=16,
         kl_anneal_epochs=100,
         load_weights=False,
         output_dir=Path("assets/results/monotonic_response_synthetic"),
@@ -296,9 +298,9 @@ if __name__ == "__main__":
     tourism_config = SweepConfig(
         dataset_name="tourism_small",
         freq="Q",
-        latent_dim=8,
+        latent_dim=16,
         kl_anneal_epochs=100,
-        load_weights=True,
+        load_weights=False,
         output_dir=Path("assets/results/monotonic_response_tourism"),
     )
     _run_config(tourism_config)
