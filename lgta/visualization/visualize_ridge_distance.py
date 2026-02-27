@@ -1,9 +1,12 @@
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from joypy import joyplot
 from matplotlib import cm
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
+
+DEFAULT_DISTANCES_DIR = "assets/data/distances"
 
 
 def build_df_ridge(
@@ -70,17 +73,24 @@ def build_df_ridge(
 
 
 def store_df_distances(
-    df: pd.DataFrame, dataset_name: str, directory: str = "."
+    df: pd.DataFrame,
+    dataset_name: str,
+    directory: str = DEFAULT_DISTANCES_DIR,
 ) -> None:
+    Path(directory).mkdir(parents=True, exist_ok=True)
     df.to_pickle(f"{directory}/{dataset_name}_distances_transformed.pkl")
 
 
-def load_df_distances(dataset_name: str, directory: str = ".") -> pd.DataFrame:
+def load_df_distances(
+    dataset_name: str, directory: str = DEFAULT_DISTANCES_DIR
+) -> pd.DataFrame:
     df = pd.read_pickle(f"{directory}/{dataset_name}_distances_transformed.pkl")
     return df
 
 
-def load_distances(dataset_name: str, directory: str = "."):
+def load_distances(
+    dataset_name: str, directory: str = DEFAULT_DISTANCES_DIR
+):
     with open(f"{directory}/{dataset_name}_distances_transformed.npy", "rb") as f:
         d_transf = np.load(f, allow_pickle=True)
     with open(f"{directory}/{dataset_name}_distances_original.npy", "rb") as f:
@@ -92,26 +102,27 @@ def plot_distances(
     dataset_name: str,
     df_rige: pd.DataFrame,
     versions: int,
-    x_range: list[int] = None,
+    x_range: list[int] | None = None,
+    save_path: Path | str | None = None,
+    show: bool = False,
 ) -> None:
-    """Plot the distances for a specific dataset
+    """Plot the distances for a specific dataset. Saves to file when save_path
+    is set; never blocks with interactive mode unless show=True.
 
     Args:
         dataset_name: name of the dataset
         df_rige: df with data in the correct shape for ridge plots
         versions: number of created versions of the dataset
         x_range: range to plot in the x_axis
-
-    Returns:
-        Dataframe containing the distances for each version and transformation
+        save_path: if set, save the figure to this path
+        show: if True, call plt.show() (interactive); default False to only store locally
     """
     if x_range is None:
         x_range = [6, 18]
     plt.figure()
-    # map versions to a 0-1 interval to sample different blue colors
     m = interp1d([0, versions], [0, 0.8])
 
-    ax, fig = joyplot(
+    joyplot(
         data=df_rige,
         by="transformation",
         legend=True,
@@ -126,4 +137,10 @@ def plot_distances(
         f"Ridgeline Plot for {dataset_name} of the DTW distance per version and transformation",
         fontsize=20,
     )
-    plt.show()
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close()

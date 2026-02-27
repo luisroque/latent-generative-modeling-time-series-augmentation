@@ -5,3 +5,4 @@ dtaidistance==2.3.12
 dtw-python==1.5.3
 scikit-learn==1.5.2
 scikit-optimize==0.10.2
+joypy==0.2.6

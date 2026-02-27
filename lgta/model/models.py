@@ -237,6 +237,14 @@ class CVAE(nn.Module):
         }
 
 
+def _valid_num_heads(embed_dim: int, preferred: int = 8) -> int:
+    """Return the largest divisor of *embed_dim* that is <= *preferred*."""
+    for h in range(preferred, 0, -1):
+        if embed_dim % h == 0:
+            return h
+    return 1
+
+
 def get_CVAE(
     window_size: int,
     n_main_features: int,
@@ -245,6 +253,7 @@ def get_CVAE(
     num_heads: int = 8,
     ff_dim: int = 256,
 ) -> tuple[Encoder, Decoder]:
+    num_heads = _valid_num_heads(n_main_features, num_heads)
     encoder = Encoder(
         window_size=window_size,
         n_main_features=n_main_features,

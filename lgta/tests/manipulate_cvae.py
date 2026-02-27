@@ -17,8 +17,8 @@ class TestModel(unittest.TestCase):
         """
         Set up a test instance of CreateTransformedVersionsCVAE and train the model.
         """
-        self.dataset_name = "prison"
-        self.freq = "Q"
+        self.dataset_name = "tourism"
+        self.freq = "M"
 
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
             dataset_name=self.dataset_name,

@@ -1,16 +1,24 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 
 
-def plot_loss(history: dict[str, list[float]], first_index: int, dataset_name: str) -> None:
+def plot_loss(
+    history: dict[str, list[float]],
+    first_index: int,
+    dataset_name: str,
+    base_dir: str = ".",
+    show: bool = False,
+) -> None:
     """
-    Plot total loss, reconstruction loss and kl_loss per epoch
+    Plot total loss, reconstruction loss and kl_loss per epoch. Saves to file
+    only; does not open interactive mode unless show=True.
 
     :param history: recorded loss dictionary with keys "loss", "reconstruction_loss", "kl_loss"
     :param first_index: first index of the loss arrays to plot to avoid hard to read plots
     :param dataset_name: name of the dataset to plot and store
+    :param show: if True, call plt.show(); default False to only store locally
     """
-
     _, ax = plt.subplots(1, 1, figsize=(8, 6))
 
     ax.plot(history["loss"][first_index:])
@@ -20,10 +28,18 @@ def plot_loss(history: dict[str, list[float]], first_index: int, dataset_name: s
     ax.set_ylabel("loss")
     ax.set_xlabel("epoch")
     plt.legend(["total_loss", "reconstruction_loss", "kl_loss"], loc="upper left")
+    base = base_dir.rstrip("/") if base_dir not in (".", "") else ""
+    plots_dir = Path(f"{base}/assets/plots" if base else "assets/plots")
+    plots_dir.mkdir(parents=True, exist_ok=True)
     plt.savefig(
-        f"./plots/vae_loss_{dataset_name}.pdf", format="pdf", bbox_inches="tight"
+        plots_dir / f"vae_loss_{dataset_name}.pdf",
+        format="pdf",
+        bbox_inches="tight",
     )
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close()
 
 
 def plot_generated_vs_original(
@@ -34,7 +50,7 @@ def plot_generated_vs_original(
     model_version: str,
     transformation: str,
     n_series: int = 8,
-    directory: str = ".",
+    directory: str = "./",
 ) -> None:
     """
     Plot generated series and the original series and store as pdf
@@ -61,9 +77,13 @@ def plot_generated_vs_original(
         f"VAE generated dataset vs original -> {dataset_name} using {transformation} with sigma={transf_param}",
         fontsize=14,
     )
+    base = directory.rstrip("/") if directory not in (".", "", "./") else ""
+    plots_dir = Path(f"{base}/assets/plots" if base else "assets/plots")
+    plots_dir.mkdir(parents=True, exist_ok=True)
     plt.savefig(
-        f"{directory}/plots/vae_{model_version}_generated_vs_original_{dataset_name}_{transformation}_{transf_param}.pdf",
+        plots_dir
+        / f"vae_{model_version}_generated_vs_original_{dataset_name}_{transformation}_{transf_param}.pdf",
         format="pdf",
         bbox_inches="tight",
     )
-    plt.show()
+    plt.close()

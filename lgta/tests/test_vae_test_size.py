@@ -1,23 +1,23 @@
 import unittest
+from lgta.tests.conftest import skip_unless_dataset
 from lgta.model.create_dataset_versions_vae import (
     CreateTransformedVersionsCVAE,
-)
-from lgta.transformations.compute_similarities_summary_metrics import (
-    compute_similarity_transformed_vs_original,
 )
 
 
 class TestModel(unittest.TestCase):
-    def test_test_size_prison(self):
+    def test_test_size_tourism_small(self):
+        skip_unless_dataset("tourism")
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
-            dataset_name="prison", freq="Q", test_size=2
+            dataset_name="tourism", freq="M", test_size=2
         )
 
         self.assertTrue(
-            self.create_dataset_vae.dataset["train"]["data"].shape == (40, 2)
+            self.create_dataset_vae.dataset["train"]["data"].shape == (204, 2)
         )
 
     def test_test_size_tourism(self):
+        skip_unless_dataset("tourism")
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
             dataset_name="tourism", freq="M", test_size=2
         )
@@ -27,6 +27,7 @@ class TestModel(unittest.TestCase):
         )
 
     def test_test_size_m5(self):
+        skip_unless_dataset("m5")
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
             dataset_name="m5", freq="W", test_size=2, weekly_m5=True
         )
@@ -36,17 +37,17 @@ class TestModel(unittest.TestCase):
         )
 
     def test_test_size_m5_daily(self):
+        skip_unless_dataset("m5")
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
             dataset_name="m5", freq="D", test_size=2, weekly_m5=False
         )
-
-        print(self.create_dataset_vae.dataset["train"]["data"].shape)
 
         self.assertTrue(
             self.create_dataset_vae.dataset["train"]["data"].shape == (1869, 2)
         )
 
     def test_test_size_police(self):
+        skip_unless_dataset("police")
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
             dataset_name="police", freq="D", test_size=2
         )

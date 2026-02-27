@@ -42,11 +42,11 @@ class TimeSeriesDataset(TorchDataset):
 
     def __init__(
         self, dynamic_features: np.ndarray, input_data: np.ndarray
-    ):
-        self.dynamic_features = torch.tensor(
-            dynamic_features, dtype=torch.float32
-        )
-        self.input_data = torch.tensor(input_data, dtype=torch.float32)
+    ) -> None:
+        dyn = np.array(dynamic_features, dtype=np.float32, copy=True)
+        inp = np.array(input_data, dtype=np.float32, copy=True)
+        self.dynamic_features = torch.from_numpy(dyn)
+        self.input_data = torch.from_numpy(inp)
 
     def __len__(self) -> int:
         return len(self.input_data)
@@ -56,6 +56,9 @@ class TimeSeriesDataset(TorchDataset):
 
 
 def _get_device() -> torch.device:
+    override = os.environ.get("LGTA_DEVICE")
+    if override:
+        return torch.device(override)
     if torch.cuda.is_available():
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -90,8 +93,6 @@ class CreateTransformedVersionsCVAE:
     This class contains several methods to preprocess data, fit a CVAE, generate new time series, and
     save transformed versions of the dataset. It's designed to be used with time-series data.
 
-    The class follows the Singleton design pattern ensuring that only one instance can exist.
-
     Args:
         dataset_name: Name of the dataset.
         freq: Frequency of the time series data.
@@ -108,13 +109,6 @@ class CreateTransformedVersionsCVAE:
             noise_scale: Scale of the Gaussian noise. Defaults to 0.1.
             amplitude: Amplitude of the time series data. Defaults to 1.0.
     """
-
-    _instance = None
-
-    def __new__(cls, *args, **kwargs) -> "CreateTransformedVersionsCVAE":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __init__(
         self,
@@ -474,6 +468,7 @@ class CreateTransformedVersionsCVAE:
                 dataset_name=self.dataset_name,
                 n_series=n_series_plot,
                 model_version=__version__,
+                directory=self.input_dir,
             )
         return dec_pred_hat
 

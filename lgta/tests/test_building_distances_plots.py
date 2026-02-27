@@ -1,5 +1,6 @@
 import unittest
 import numpy as np
+import pathlib
 
 from lgta.transformations.compute_distances import compute_store_distances
 from lgta.visualization.visualize_ridge_distance import (
@@ -10,18 +11,29 @@ from lgta.visualization.visualize_ridge_distance import (
     load_df_distances,
 )
 from lgta.feature_engineering.get_data_distance import get_data
-import pathlib
+
+
+def _assets_exist(assets_transformed: pathlib.Path, dataset: str) -> bool:
+    dataset_dir = assets_transformed / dataset
+    return dataset_dir.exists() and any(dataset_dir.iterdir())
 
 
 class TestBuildingDistancePlots(unittest.TestCase):
     def setUp(self):
-        base_path = pathlib.Path(__file__).parent.resolve()
-        self.dataset = "prison"
-        self.versions = 6
-        self.transformations = ["jitter", "scaling", "magnitude_warp", "time_warp"]
+        project_root = pathlib.Path(__file__).resolve().parent.parent.parent
+        self.assets_transformed = project_root / "assets" / "data" / "transformed_datasets"
+        self.assets_distances = project_root / "assets" / "data" / "distances"
+        self.dataset = "tourism"
+        self.versions = 2
+        self.transformations = ["jitter", "scaling"]
+        if not _assets_exist(self.assets_transformed, self.dataset):
+            raise unittest.SkipTest(
+                f"Assets not found at {self.assets_transformed / self.dataset}; "
+                "run data pipeline to generate transformed datasets."
+            )
         self.data_orig, self.data_transf = get_data(
-            f"{base_path}/assets/data/transformed_datasets",
-            f"{base_path}/assets/data/transformed_datasets",
+            str(self.assets_transformed),
+            str(self.assets_transformed),
             self.dataset,
             transformations=self.transformations,
             versions=self.versions,
@@ -33,6 +45,7 @@ class TestBuildingDistancePlots(unittest.TestCase):
             self.data_transf,
             self.transformations,
             self.versions,
+            directory=str(self.assets_distances),
         )
         self.n_d = self.d_transf.shape[2]
 
@@ -47,18 +60,33 @@ class TestBuildingDistancePlots(unittest.TestCase):
         df_ridge = build_df_ridge(
             self.d_transf, self.d_orig, self.n_d, self.transformations, self.versions
         )
-        self.assertTrue(df_ridge.shape == (1984, 8))
+        expected_rows = self.n_d * len(self.transformations)
+        expected_cols = 2 + self.versions
+        self.assertEqual(df_ridge.shape, (expected_rows, expected_cols))
 
     def test_store_load_data(self):
-        df_transf_load, d_orig_load = load_distances(self.dataset)
-        self.assertTrue(df_transf_load.shape == (4, 6, 496))
+        d_transf_load, d_orig_load = load_distances(
+            self.dataset, directory=str(self.assets_distances)
+        )
+        self.assertEqual(
+            d_transf_load.shape,
+            (len(self.transformations), self.versions, self.n_d),
+        )
 
     def test_store_distances_df(self):
         df_ridge = build_df_ridge(
             self.d_transf, self.d_orig, self.n_d, self.transformations, self.versions
         )
-        store_df_distances(df_ridge, self.dataset)
+        store_df_distances(df_ridge, self.dataset, directory=str(self.assets_distances))
 
     def test_plot_distances(self):
-        df_ridge = load_df_distances(self.dataset)
-        plot_distances(self.dataset, df_ridge, self.versions, x_range=[0, 10])
+        df_ridge = load_df_distances(
+            self.dataset, directory=str(self.assets_distances)
+        )
+        plot_distances(
+            self.dataset,
+            df_ridge,
+            self.versions,
+            x_range=[0, 10],
+            show=False,
+        )

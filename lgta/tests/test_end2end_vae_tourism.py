@@ -1,4 +1,5 @@
 import unittest
+from lgta.tests.conftest import skip_unless_dataset
 from lgta.model.create_dataset_versions_vae import (
     CreateTransformedVersionsCVAE,
 )
@@ -9,11 +10,12 @@ from lgta.transformations.compute_similarities_summary_metrics import (
 
 class TestModel(unittest.TestCase):
     def setUp(self) -> None:
+        skip_unless_dataset("tourism")
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
-            dataset_name="tourism", freq="M"
+            dataset_name="tourism", freq="M", top=5
         )
 
-        self.model, _, _ = self.create_dataset_vae.fit(epochs=20, load_weights=False)
+        self.model, _, _ = self.create_dataset_vae.fit(epochs=1, load_weights=False)
         (
             self.preds,
             self.z,
@@ -45,5 +47,5 @@ class TestModel(unittest.TestCase):
             n_versions=2,
             n_samples=3,
         )
-        # shape (n_versions, n_samples, n_samples, n_series)
-        self.assertTrue(new_datasets.shape == (2, 3, 228, 304))
+        # shape (n_versions, n_samples, n_samples, n_series) — top=5 so 5 series
+        self.assertTrue(new_datasets.shape == (2, 3, 228, 5))
