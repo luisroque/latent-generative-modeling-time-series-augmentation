@@ -1,9 +1,11 @@
-torch==2.10.0
+torch==2.8.0
 matplotlib==3.9.2
 seaborn==0.13.2
 dtaidistance==2.3.12
 dtw-python==1.5.3
+fastdtw==0.3.4
 scikit-learn==1.5.2
 scikit-optimize==0.10.2
 joypy==0.2.6
 datasetsforecast==1.0.1
+pymdma==0.2.2

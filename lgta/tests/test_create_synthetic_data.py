@@ -28,7 +28,9 @@ class TestSyntheticDataset(unittest.TestCase):
             freq=self.freq,
         )
 
-        model, _, _ = create_dataset_cvae.fit(epochs=2, latent_dim=3)
+        model, _, _ = create_dataset_cvae.fit(
+            epochs=2, latent_dim=3, kl_anneal_epochs=1,
+        )
         (
             preds,
             z,

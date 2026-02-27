@@ -257,10 +257,12 @@ class CreateTransformedVersionsCVAE:
         epochs: int = 1000,
         batch_size: int = 5,
         patience: int = 30,
-        latent_dim: int = 2,
+        latent_dim: int = 8,
         learning_rate: float = 0.001,
         hyper_tuning: bool = False,
         load_weights: bool = True,
+        kl_anneal_epochs: int = 100,
+        kl_weight_max: float = 1.0,
     ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
         Training our CVAE on the dataset supplied.
@@ -280,21 +282,29 @@ class CreateTransformedVersionsCVAE:
             latent_dim=latent_dim,
         )
 
-        cvae = CVAE(encoder, decoder, self.window_size)
+        cvae = CVAE(encoder, decoder, self.window_size, kl_weight=0.0)
         cvae = cvae.to(self.device)
 
         weights_folder = f"{self.input_dir}assets/model_weights"
         os.makedirs(weights_folder, exist_ok=True)
         weights_file = os.path.join(
-            weights_folder, f"{self.dataset_name}_vae_weights.pt"
+            weights_folder,
+            f"{self.dataset_name}_n{n_main_features}_w{self.window_size}_l{latent_dim}_vae_weights.pt",
         )
 
         if os.path.exists(weights_file) and not hyper_tuning and load_weights:
-            print("Loading existing weights...")
-            cvae.load_state_dict(
-                torch.load(weights_file, map_location=self.device, weights_only=True)
-            )
-            return cvae, None, 0.0
+            try:
+                print("Loading existing weights...")
+                state = torch.load(
+                    weights_file, map_location=self.device, weights_only=True
+                )
+                cvae.load_state_dict(state)
+                return cvae, None, 0.0
+            except (RuntimeError, KeyError):
+                print(
+                    "Checkpoint dimensions don't match current model, "
+                    "training from scratch."
+                )
 
         dataset = TimeSeriesDataset(dynamic_features_np, X_inp_np)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
@@ -307,6 +317,7 @@ class CreateTransformedVersionsCVAE:
             "loss": [],
             "reconstruction_loss": [],
             "kl_loss": [],
+            "kl_weight": [],
         }
 
         best_loss = float("inf")
@@ -321,6 +332,9 @@ class CreateTransformedVersionsCVAE:
         print(f"Trainable params: {trainable_params:,}")
 
         for epoch in range(epochs):
+            kl_weight = min(1.0, epoch / max(kl_anneal_epochs, 1)) * kl_weight_max
+            cvae.kl_weight = kl_weight
+
             cvae.train()
             epoch_loss = 0.0
             epoch_recon = 0.0
@@ -348,14 +362,17 @@ class CreateTransformedVersionsCVAE:
             history["loss"].append(avg_loss)
             history["reconstruction_loss"].append(avg_recon)
             history["kl_loss"].append(avg_kl)
+            history["kl_weight"].append(kl_weight)
 
-            if avg_loss < best_loss:
-                best_loss = avg_loss
+            if avg_recon < best_loss:
+                best_loss = avg_recon
                 epochs_no_improve = 0
                 best_state = {k: v.cpu().clone() for k, v in cvae.state_dict().items()}
                 torch.save(best_state, weights_file)
                 print(
-                    f"Epoch {epoch + 1}: loss improved to {avg_loss:.6f} - saving weights"
+                    f"Epoch {epoch + 1}: loss={avg_loss:.6f} "
+                    f"(recon={avg_recon:.6f}, kl={avg_kl:.6f}, "
+                    f"kl_w={kl_weight:.4f}) - saving weights"
                 )
             else:
                 epochs_no_improve += 1
@@ -368,6 +385,7 @@ class CreateTransformedVersionsCVAE:
             cvae.load_state_dict(best_state)
             cvae = cvae.to(self.device)
 
+        cvae.kl_weight = kl_weight_max
         return cvae, history, best_loss
 
     def predict(
