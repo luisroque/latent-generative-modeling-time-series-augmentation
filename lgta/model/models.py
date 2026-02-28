@@ -1,17 +1,28 @@
 """
 L-GTA model architecture: Conditional Variational Autoencoder (CVAE) with
-Bi-LSTM encoder/decoder and attention-based conditioning on dynamic features.
+a global latent code per window.
 
-Encoder: Bi-LSTM(z) -> h_t, then VMHA(h_t, c) -> phi -> (mu_t, Sigma_t) -> v_t
-Decoder: Bi-LSTM(v_t) -> cross_attn(dec, c) -> psi(y_t) -> z_tilde_t
+Encoder: concat(x, c) -> BiLSTM -> BN -> SelfAttn+PosEmbed -> MeanPool
+         -> Dense(relu) -> BN -> (mu, log_var) -> z
+Decoder: RepeatVector(z) + c -> BiLSTM -> Flatten -> Dense -> Reshape -> x_hat
 
-Free bits (Kingma et al. 2016) enforces a per-dimension minimum KL to prevent
-posterior collapse when dynamic features provide a reconstruction shortcut.
+The encoder produces a single global latent code z per window by mean-pooling
+the temporal dimension after self-attention. This ensures perturbations to z
+produce coherent, controlled changes across all timesteps. The decoder uses
+dynamic features to recover temporal structure from the global code.
 """
+
+from enum import Enum
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .helper import Sampling
+
+
+class EncoderType(str, Enum):
+    FULL = "full"
+    SIMPLE = "simple"
 
 
 class PositionalEmbedding(nn.Module):
@@ -29,76 +40,60 @@ class PositionalEmbedding(nn.Module):
         return inputs + self.pos_embedding[:seq_len, :].unsqueeze(0)
 
 
-class VariationalMultiHeadAttention(nn.Module):
-    """VMHA(h_t, c): Enriches Bi-LSTM hidden states h_t with condition c through
-    self-attention (long-range temporal dependencies) and cross-attention
-    (condition-aware representations). Preserves per-timestep temporal structure
-    for subsequent variational sampling.
+class TransformerPooling(nn.Module):
+    """Self-attention with positional encoding followed by temporal mean pooling.
+
+    Attends across timesteps to capture long-range dependencies, then
+    mean-pools to produce a single global context vector per sample.
     """
 
     def __init__(
         self,
-        h_dim: int,
-        c_dim: int,
+        embed_dim: int,
         num_heads: int,
         ff_dim: int,
         max_seq_len: int,
         rate: float = 0.3,
     ):
         super().__init__()
-        self.pos_embed = PositionalEmbedding(max_seq_len, h_dim)
-        self.c_proj = nn.Linear(c_dim, h_dim)
-
+        self.pos_embed = PositionalEmbedding(max_seq_len, embed_dim)
         self.self_attn = nn.MultiheadAttention(
-            embed_dim=h_dim, num_heads=num_heads, batch_first=True
+            embed_dim=embed_dim, num_heads=num_heads, batch_first=True
         )
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=h_dim, num_heads=num_heads, batch_first=True
-        )
-
         self.ffn = nn.Sequential(
-            nn.Linear(h_dim, ff_dim),
+            nn.Linear(embed_dim, ff_dim),
             nn.ReLU(),
-            nn.Linear(ff_dim, h_dim),
+            nn.Linear(ff_dim, embed_dim),
         )
-
-        self.ln_self = nn.LayerNorm(h_dim, eps=1e-6)
-        self.ln_cross = nn.LayerNorm(h_dim, eps=1e-6)
-        self.ln_ffn = nn.LayerNorm(h_dim, eps=1e-6)
-
-        self.drop_self = nn.Dropout(rate)
-        self.drop_cross = nn.Dropout(rate)
-        self.drop_ffn = nn.Dropout(rate)
-
+        self.ln1 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.ln2 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.drop1 = nn.Dropout(rate)
+        self.drop2 = nn.Dropout(rate)
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nn.init.xavier_uniform_(self.c_proj.weight)
         for layer in self.ffn:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_uniform_(layer.weight)
 
-    def forward(
-        self, h: torch.Tensor, c: torch.Tensor
-    ) -> torch.Tensor:
-        c_proj = self.c_proj(c)
-        h = self.pos_embed(h)
-
-        self_out, _ = self.self_attn(h, h, h)
-        self_out = self.drop_self(self_out)
-        h = self.ln_self(h + self_out)
-
-        cross_out, _ = self.cross_attn(query=h, key=c_proj, value=c_proj)
-        cross_out = self.drop_cross(cross_out)
-        h = self.ln_cross(h + cross_out)
-
-        ffn_out = self.ffn(h)
-        ffn_out = self.drop_ffn(ffn_out)
-        return self.ln_ffn(h + ffn_out)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pos_embed(x)
+        attn_out, _ = self.self_attn(x, x, x)
+        attn_out = self.drop1(attn_out)
+        x = self.ln1(x + attn_out)
+        ffn_out = self.ffn(x)
+        ffn_out = self.drop2(ffn_out)
+        x = self.ln2(x + ffn_out)
+        return x.mean(dim=1)
 
 
 class Encoder(nn.Module):
-    """Bi-LSTM encoder with VMHA and per-timestep variational sampling."""
+    """BiLSTM encoder with self-attention pooling producing a global latent code.
+
+    Concatenates dynamic features with the raw input, processes through BiLSTM
+    and self-attention, then mean-pools across time to produce a single z per
+    window — ensuring latent perturbations affect all timesteps coherently.
+    """
 
     def __init__(
         self,
@@ -108,32 +103,33 @@ class Encoder(nn.Module):
         latent_dim: int,
         num_heads: int = 8,
         ff_dim: int = 256,
+        dropout_rate: float = 0.3,
     ):
         super().__init__()
+        self.n_main_features = n_main_features
+
         self.lstm = nn.LSTM(
-            input_size=n_main_features,
+            input_size=n_main_features + n_dyn_features,
             hidden_size=n_main_features,
             batch_first=True,
             bidirectional=True,
         )
-        self.batch_norm = nn.BatchNorm1d(window_size)
+        self.ln_lstm = nn.LayerNorm(n_main_features)
 
-        self.vmha = VariationalMultiHeadAttention(
-            h_dim=n_main_features,
-            c_dim=n_dyn_features,
+        self.transformer = TransformerPooling(
+            embed_dim=n_main_features,
             num_heads=num_heads,
             ff_dim=ff_dim,
             max_seq_len=window_size,
+            rate=dropout_rate,
         )
 
-        self.dropout = nn.Dropout(0.3)
-
+        self.dropout = nn.Dropout(dropout_rate)
         self.dense_latent = nn.Linear(n_main_features, latent_dim)
-        self.batch_norm_latent = nn.BatchNorm1d(window_size)
+        self.ln_latent = nn.LayerNorm(latent_dim)
 
         self.z_mean_layer = nn.Linear(latent_dim, latent_dim)
         self.z_log_var_layer = nn.Linear(latent_dim, latent_dim)
-
         self.sampling = Sampling()
         self._init_weights()
 
@@ -145,31 +141,28 @@ class Encoder(nn.Module):
     def forward(
         self, dyn_inp: torch.Tensor, inp: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        h, _ = self.lstm(inp)
-        # Average forward and backward directions (merge_mode="ave")
-        h = (h[:, :, : inp.shape[-1]] + h[:, :, inp.shape[-1] :]) / 2.0
+        x = torch.cat([dyn_inp, inp], dim=-1)
+        h, _ = self.lstm(x)
+        h = (h[:, :, : self.n_main_features] + h[:, :, self.n_main_features :]) / 2.0
+        h = self.ln_lstm(h)
 
-        h = self.batch_norm(h)
+        context = self.transformer(h)
+        context = self.dropout(context)
 
-        enc = self.vmha(h, dyn_inp)
-        enc = self.dropout(enc)
-
-        enc = torch.relu(self.dense_latent(enc))
-        enc = self.batch_norm_latent(enc)
+        enc = F.relu(self.dense_latent(context))
+        enc = self.ln_latent(enc)
 
         z_mean = self.z_mean_layer(enc)
         z_log_var = self.z_log_var_layer(enc)
-
         z = self.sampling(z_mean, z_log_var)
         return z_mean, z_log_var, z
 
 
-class Decoder(nn.Module):
-    """Bi-LSTM decoder with cross-attention conditioning on dynamic features.
+class SimpleEncoder(nn.Module):
+    """BiLSTM encoder with mean pooling (no self-attention) for a global latent code.
 
-    The LSTM processes latent z alone, then cross-attention integrates dynamic
-    features — symmetric with the encoder's VMHA conditioning and removing the
-    direct-concatenation shortcut that caused posterior collapse.
+    Simpler alternative to Encoder that skips TransformerPooling, using direct
+    temporal mean pooling of BiLSTM hidden states instead.
     """
 
     def __init__(
@@ -178,52 +171,123 @@ class Decoder(nn.Module):
         n_main_features: int,
         n_dyn_features: int,
         latent_dim: int,
-        num_heads: int = 8,
-        rate: float = 0.3,
+        dropout_rate: float = 0.3,
     ):
         super().__init__()
+        self.n_main_features = n_main_features
+
         self.lstm = nn.LSTM(
-            input_size=latent_dim,
+            input_size=n_main_features + n_dyn_features,
+            hidden_size=n_main_features,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.ln_lstm = nn.LayerNorm(n_main_features)
+
+        self.dropout = nn.Dropout(dropout_rate)
+        self.dense_latent = nn.Linear(n_main_features, latent_dim)
+        self.ln_latent = nn.LayerNorm(latent_dim)
+
+        self.z_mean_layer = nn.Linear(latent_dim, latent_dim)
+        self.z_log_var_layer = nn.Linear(latent_dim, latent_dim)
+        self.sampling = Sampling()
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        nn.init.xavier_uniform_(self.dense_latent.weight)
+        nn.init.xavier_uniform_(self.z_mean_layer.weight)
+        nn.init.xavier_uniform_(self.z_log_var_layer.weight)
+
+    def forward(
+        self, dyn_inp: torch.Tensor, inp: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x = torch.cat([dyn_inp, inp], dim=-1)
+        h, _ = self.lstm(x)
+        h = (h[:, :, : self.n_main_features] + h[:, :, self.n_main_features :]) / 2.0
+        h = self.ln_lstm(h)
+
+        context = h.mean(dim=1)
+        context = self.dropout(context)
+
+        enc = F.relu(self.dense_latent(context))
+        enc = self.ln_latent(enc)
+
+        z_mean = self.z_mean_layer(enc)
+        z_log_var = self.z_log_var_layer(enc)
+        z = self.sampling(z_mean, z_log_var)
+        return z_mean, z_log_var, z
+
+
+class Decoder(nn.Module):
+    """BiLSTM decoder that reconstructs temporal output from a global latent code.
+
+    Broadcasts z across time via RepeatVector, concatenates with dynamic
+    features for temporal position, processes through BiLSTM for temporal
+    coherence, then applies a dense projection to reconstruct the window.
+
+    A linear skip connection (z_proj) projects z directly into the LSTM
+    hidden-state space and adds it before the final FC layer. This
+    guarantees a linear path from latent perturbations to the output,
+    preserving controllability even when LSTM gates saturate.
+    """
+
+    def __init__(
+        self,
+        window_size: int,
+        n_main_features: int,
+        n_dyn_features: int,
+        latent_dim: int,
+        dropout_rate: float = 0.3,
+        spectral_norm: bool = False,
+    ):
+        super().__init__()
+        self.window_size = window_size
+        self.n_main_features = n_main_features
+
+        self.lstm = nn.LSTM(
+            input_size=latent_dim + n_dyn_features,
             hidden_size=n_main_features,
             batch_first=True,
             bidirectional=True,
         )
 
-        self.c_proj = nn.Linear(n_dyn_features, n_main_features)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=n_main_features, num_heads=num_heads, batch_first=True
-        )
-        self.ln_cross = nn.LayerNorm(n_main_features, eps=1e-6)
-        self.drop_cross = nn.Dropout(rate)
+        self.z_proj = nn.Linear(latent_dim, n_main_features)
 
-        self.output_layer = nn.Linear(n_main_features, n_main_features)
+        flat_dim = window_size * n_main_features
+        fc = nn.Linear(flat_dim, flat_dim)
+        self.fc = nn.utils.spectral_norm(fc) if spectral_norm else fc
+        self._spectral_norm = spectral_norm
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nn.init.xavier_uniform_(self.c_proj.weight)
-        nn.init.xavier_uniform_(self.output_layer.weight)
+        if not self._spectral_norm:
+            nn.init.xavier_uniform_(self.fc.weight)
+        nn.init.xavier_uniform_(self.z_proj.weight, gain=0.1)
+        nn.init.zeros_(self.z_proj.bias)
 
     def forward(
         self, z: torch.Tensor, dyn_inp: torch.Tensor
     ) -> torch.Tensor:
-        dec, _ = self.lstm(z)
-        hidden_size = dec.shape[-1] // 2
-        dec = (dec[:, :, :hidden_size] + dec[:, :, hidden_size:]) / 2.0
+        z_repeated = z.unsqueeze(1).expand(-1, self.window_size, -1)
+        dec_inp = torch.cat([z_repeated, dyn_inp], dim=-1)
 
-        c_proj = self.c_proj(dyn_inp)
-        cross_out, _ = self.cross_attn(query=dec, key=c_proj, value=c_proj)
-        cross_out = self.drop_cross(cross_out)
-        dec = self.ln_cross(dec + cross_out)
+        h, _ = self.lstm(dec_inp)
+        h = (h[:, :, : self.n_main_features] + h[:, :, self.n_main_features :]) / 2.0
 
-        return self.output_layer(dec)
+        z_skip = self.z_proj(z).unsqueeze(1).expand(-1, self.window_size, -1)
+        h = h + z_skip
+
+        h_flat = h.reshape(h.shape[0], -1)
+        out_flat = self.fc(h_flat)
+        return out_flat.reshape(-1, self.window_size, self.n_main_features)
 
 
 class CVAE(nn.Module):
-    """Conditional Variational Autoencoder combining encoder and decoder."""
+    """Conditional Variational Autoencoder with global latent code."""
 
     def __init__(
         self,
-        encoder: Encoder,
+        encoder: Encoder | SimpleEncoder,
         decoder: Decoder,
         window_size: int,
         kl_weight: float = 1.0,
@@ -240,7 +304,7 @@ class CVAE(nn.Module):
         self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
     ) -> torch.Tensor:
         z_mean, z_log_var, z = self.encoder(dynamic_features, inp_data)
-        return self.decoder(z, dynamic_features)
+        return self.decoder(z_mean, dynamic_features)
 
     def compute_loss(
         self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
@@ -249,11 +313,12 @@ class CVAE(nn.Module):
         pred = self.decoder(z, dynamic_features)
 
         reconstruction_loss = torch.mean((inp_data - pred) ** 2)
-        kl_per_element = -0.5 * (
+        kl_per_dim = -0.5 * (
             1 + z_log_var - z_mean.pow(2) - z_log_var.exp()
         )
-        kl_per_dim = kl_per_element.sum(dim=1).mean(dim=0)
-        kl_loss = torch.clamp(kl_per_dim, min=self.free_bits).sum()
+        if self.free_bits > 0.0:
+            kl_per_dim = torch.clamp(kl_per_dim, min=self.free_bits)
+        kl_loss = torch.mean(torch.sum(kl_per_dim, dim=1))
         total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
         return {
@@ -278,21 +343,35 @@ def get_CVAE(
     latent_dim: int,
     num_heads: int = 8,
     ff_dim: int = 256,
-) -> tuple[Encoder, Decoder]:
-    num_heads = _valid_num_heads(n_main_features, num_heads)
-    encoder = Encoder(
-        window_size=window_size,
-        n_main_features=n_main_features,
-        n_dyn_features=n_dyn_features,
-        latent_dim=latent_dim,
-        num_heads=num_heads,
-        ff_dim=ff_dim,
-    )
+    dropout_rate: float = 0.3,
+    encoder_type: EncoderType = EncoderType.FULL,
+    spectral_norm: bool = False,
+) -> tuple[Encoder | SimpleEncoder, Decoder]:
+    if encoder_type == EncoderType.SIMPLE:
+        encoder: Encoder | SimpleEncoder = SimpleEncoder(
+            window_size=window_size,
+            n_main_features=n_main_features,
+            n_dyn_features=n_dyn_features,
+            latent_dim=latent_dim,
+            dropout_rate=dropout_rate,
+        )
+    else:
+        num_heads = _valid_num_heads(n_main_features, num_heads)
+        encoder = Encoder(
+            window_size=window_size,
+            n_main_features=n_main_features,
+            n_dyn_features=n_dyn_features,
+            latent_dim=latent_dim,
+            num_heads=num_heads,
+            ff_dim=ff_dim,
+            dropout_rate=dropout_rate,
+        )
     decoder = Decoder(
         window_size=window_size,
         n_main_features=n_main_features,
         n_dyn_features=n_dyn_features,
         latent_dim=latent_dim,
-        num_heads=num_heads,
+        dropout_rate=dropout_rate,
+        spectral_norm=spectral_norm,
     )
     return encoder, decoder

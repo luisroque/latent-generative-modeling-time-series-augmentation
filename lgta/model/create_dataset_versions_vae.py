@@ -9,12 +9,9 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 from pathlib import Path
-from typing import Optional, Union
-from sklearn.preprocessing import MinMaxScaler
-from lgta.model.models import CVAE, get_CVAE
-from lgta.feature_engineering.static_features import (
-    create_static_features,
-)
+from typing import Literal, Optional, Union
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from lgta.model.models import CVAE, EncoderType, get_CVAE
 from lgta.feature_engineering.dynamic_features import (
     create_dynamic_features,
 )
@@ -64,6 +61,8 @@ def _get_device() -> torch.device:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
 
 
 def _normalize_transformations(
@@ -118,6 +117,7 @@ class CreateTransformedVersionsCVAE:
         num_variants: int = 20,
         noise_scale: float = 0.1,
         amplitude: float = 1.0,
+        scaler_type: str = "standard",
     ):
         self.dataset_name = dataset_name
         self.input_dir = input_dir
@@ -129,6 +129,7 @@ class CreateTransformedVersionsCVAE:
         self.num_variants = num_variants
         self.noise_scale = noise_scale
         self.amplitude = amplitude
+        self.scaler_type = scaler_type
         self.dataset = self._get_dataset()
         if window_size:
             self.window_size = window_size
@@ -218,9 +219,6 @@ class CreateTransformedVersionsCVAE:
         ) as f:
             np.save(f, y_new)
 
-    def _generate_static_features(self, n: int) -> None:
-        self.static_features = create_static_features(self.groups, self.dataset)
-
     def _feature_engineering(
         self, n: int
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -231,7 +229,10 @@ class CreateTransformedVersionsCVAE:
         """
         self.X_train_raw = self.df.astype(np.float32).to_numpy()
 
-        self.scaler_target = MinMaxScaler().fit(self.X_train_raw)
+        if self.scaler_type == "standard":
+            self.scaler_target = StandardScaler().fit(self.X_train_raw)
+        else:
+            self.scaler_target = MinMaxScaler().fit(self.X_train_raw)
         X_train_raw_scaled = self.scaler_target.transform(self.X_train_raw)
 
         if n == self.n:
@@ -249,26 +250,26 @@ class CreateTransformedVersionsCVAE:
             self.window_size,
         )
 
-        if not getattr(self, "use_dynamic_features", True):
-            self.dynamic_features_inp = [np.zeros_like(self.dynamic_features_inp[0])]
-
         self.input_data = (self.dynamic_features_inp, X_inp)
         return self.dynamic_features_inp[0], X_inp[0]
 
     def fit(
         self,
         epochs: int = 1000,
-        batch_size: int = 5,
+        batch_size: int = 8,
         patience: int = 30,
         latent_dim: int = 16,
         learning_rate: float = 0.001,
         hyper_tuning: bool = False,
         load_weights: bool = True,
-        kl_anneal_epochs: int = 100,
-        kl_weight_max: float = 1.0,
-        free_bits: float = 0.5,
+        kl_anneal_epochs: int = 30,
+        kl_weight_max: float = 0.1,
         grad_clip_norm: float = 1.0,
-        use_dynamic_features: bool = False,
+        encoder_type: EncoderType = EncoderType.FULL,
+        free_bits: float = 0.0,
+        spectral_norm: bool = False,
+        cyclical_kl: bool = False,
+        cyclical_kl_cycle_length: int = 50,
     ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
         Training our CVAE on the dataset supplied.
@@ -276,7 +277,6 @@ class CreateTransformedVersionsCVAE:
         Returns:
             Tuple of (trained model, training history dict or None, best loss).
         """
-        self.use_dynamic_features = use_dynamic_features
         dynamic_features_np, X_inp_np = self._feature_engineering(self.n_train)
 
         n_main_features = X_inp_np.shape[-1]
@@ -287,11 +287,14 @@ class CreateTransformedVersionsCVAE:
             n_main_features=n_main_features,
             n_dyn_features=n_dyn_features,
             latent_dim=latent_dim,
+            encoder_type=encoder_type,
+            spectral_norm=spectral_norm,
         )
 
         cvae = CVAE(
             encoder, decoder, self.window_size,
-            kl_weight=0.0, free_bits=free_bits,
+            kl_weight=0.0,
+            free_bits=free_bits,
         )
         cvae = cvae.to(self.device)
 
@@ -320,7 +323,10 @@ class CreateTransformedVersionsCVAE:
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         optimizer = torch.optim.Adam(
-            cvae.parameters(), lr=learning_rate, weight_decay=0.001
+            cvae.parameters(), lr=learning_rate, weight_decay=0.0001
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=15, min_lr=1e-6
         )
 
         history: dict[str, list[float]] = {
@@ -342,8 +348,21 @@ class CreateTransformedVersionsCVAE:
         print(f"Trainable params: {trainable_params:,}")
 
         for epoch in range(epochs):
-            kl_weight = min(1.0, epoch / max(kl_anneal_epochs, 1)) * kl_weight_max
+            if cyclical_kl:
+                cycle_pos = (epoch % cyclical_kl_cycle_length) / cyclical_kl_cycle_length
+                kl_weight = min(1.0, cycle_pos * 2) * kl_weight_max
+            else:
+                kl_weight = min(1.0, epoch / max(kl_anneal_epochs, 1)) * kl_weight_max
             cvae.kl_weight = kl_weight
+
+            if not cyclical_kl and epoch == kl_anneal_epochs:
+                best_loss = float("inf")
+                epochs_no_improve = 0
+                print(
+                    f"Epoch {epoch + 1}: KL annealing complete "
+                    f"(kl_w={kl_weight:.4f}). "
+                    f"Resetting early stopping."
+                )
 
             cvae.train()
             epoch_loss = 0.0
@@ -377,17 +396,23 @@ class CreateTransformedVersionsCVAE:
             history["kl_loss"].append(avg_kl)
             history["kl_weight"].append(kl_weight)
 
+            annealing_done = cyclical_kl or epoch >= kl_anneal_epochs
+            if annealing_done:
+                scheduler.step(avg_loss)
+
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 epochs_no_improve = 0
                 best_state = {k: v.cpu().clone() for k, v in cvae.state_dict().items()}
                 torch.save(best_state, weights_file)
+                current_lr = optimizer.param_groups[0]["lr"]
                 print(
                     f"Epoch {epoch + 1}: loss={avg_loss:.6f} "
                     f"(recon={avg_recon:.6f}, kl={avg_kl:.6f}, "
-                    f"kl_w={kl_weight:.4f}) - saving weights"
+                    f"kl_w={kl_weight:.4f}, "
+                    f"lr={current_lr:.2e}) - saving"
                 )
-            elif epoch >= kl_anneal_epochs:
+            elif annealing_done:
                 epochs_no_improve += 1
 
             if epochs_no_improve >= patience:
@@ -402,7 +427,9 @@ class CreateTransformedVersionsCVAE:
         return cvae, history, best_loss
 
     def predict(
-        self, cvae: CVAE
+        self,
+        cvae: CVAE,
+        detemporalize_method: Literal["mean", "center"] = "mean",
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Predict original time series using CVAE.
@@ -424,20 +451,19 @@ class CreateTransformedVersionsCVAE:
             )
 
             z_mean, z_log_var, z = cvae.encoder(dyn_tensor, x_tensor)
-            preds = cvae.decoder(z, dyn_tensor)
+            preds = cvae.decoder(z_mean, dyn_tensor)
 
             preds = preds.cpu().numpy()
             z_mean = z_mean.cpu().numpy()
             z_log_var = z_log_var.cpu().numpy()
             z = z.cpu().numpy()
 
-        preds = detemporalize(preds, self.window_size)
-        X_hat = self.scaler_target.inverse_transform(preds)
-        X_hat_complete = np.concatenate(
-            (self.X_train_raw[: self.window_size], X_hat), axis=0
+        preds = detemporalize(
+            preds, self.window_size, method=detemporalize_method
         )
+        X_hat = self.scaler_target.inverse_transform(preds)
 
-        return X_hat_complete, z, z_mean, z_log_var
+        return X_hat, z, z_mean, z_log_var
 
     def generate_transformed_time_series(
         self,
@@ -448,6 +474,9 @@ class CreateTransformedVersionsCVAE:
         transf_param: Union[float, list[float]] = 0.5,
         plot_predictions: bool = True,
         n_series_plot: int = 8,
+        sample_from_posterior: bool = False,
+        detemporalize_method: Literal["mean", "center"] = "mean",
+        clip_to_unit_interval: bool = False,
     ) -> np.ndarray:
         """
         Generate new time series by sampling from the CVAE latent space.
@@ -455,7 +484,7 @@ class CreateTransformedVersionsCVAE:
         Supports sequential chaining of transformations on latent samples:
         v' = T_n(...T_2(T_1(v, eta_1), eta_2)..., eta_n)
         """
-        self._feature_engineering(self.n)
+        self._feature_engineering(self.n_train)
 
         transformations, transf_params = _normalize_transformations(
             transformation, transf_param
@@ -468,11 +497,13 @@ class CreateTransformedVersionsCVAE:
             window_size=self.window_size,
             dynamic_features_inp=self.dynamic_features_inp[0],
             scaler_target=self.scaler_target,
-            n_features=self.n_features,
             n=self.n,
             transformations=transformations,
             transf_params=transf_params,
             device=self.device,
+            sample_from_posterior=sample_from_posterior,
+            detemporalize_method=detemporalize_method,
+            clip_to_unit_interval=clip_to_unit_interval,
         )
 
         if plot_predictions:

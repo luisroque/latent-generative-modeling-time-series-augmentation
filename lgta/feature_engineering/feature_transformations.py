@@ -1,5 +1,9 @@
 import numpy as np
 import pandas as pd
+from typing import Literal
+
+
+DetemporalizeMethod = Literal["mean", "center"]
 
 
 def temporalize(data: np.ndarray, window_size: int) -> np.ndarray:
@@ -21,28 +25,65 @@ def temporalize(data: np.ndarray, window_size: int) -> np.ndarray:
     return np.array(X)
 
 
-def detemporalize(data: np.ndarray, window_size: int) -> np.ndarray:
+def _detemporalize_mean(
+    data: np.ndarray,
+    window_size: int,
+) -> np.ndarray:
     """
-    Transform the data back to the original shape
+    Reconstruct the original time-series shape by averaging predictions from
+    all overlapping windows that cover each timestep.
 
-    :param data: data to back transform
-    :param window_size: rolling window
-
-    :return: data in the original shape
+    Each timestep t appears in up to `window_size` different windows. Averaging
+    all available predictions reduces variance by up to sqrt(window_size).
     """
     num_sequences, seq_len, num_features = data.shape
     num_data_points = num_sequences + window_size - 1
 
     output = np.zeros((num_data_points, num_features))
+    counts = np.zeros((num_data_points, 1))
 
-    # Copy the first window directly
-    output[:window_size] = data[0]
+    for i in range(num_sequences):
+        output[i : i + seq_len] += data[i]
+        counts[i : i + seq_len] += 1
 
-    # Copy the last time step from the remaining windows
-    for i in range(1, num_sequences):
-        output[window_size + i - 1] = data[i, -1]
+    output /= counts
+    return output
+
+
+def _detemporalize_center(
+    data: np.ndarray,
+    window_size: int,
+) -> np.ndarray:
+    """Reconstruct by selecting the most centered window prediction per timestep."""
+    num_sequences, seq_len, num_features = data.shape
+    num_data_points = num_sequences + window_size - 1
+    center_idx = window_size // 2
+
+    output = np.zeros((num_data_points, num_features))
+
+    for t in range(num_data_points):
+        # Pick a window index such that timestep t is as close as possible
+        # to the center position inside that window.
+        window_idx = t - center_idx
+        window_idx = min(max(window_idx, 0), num_sequences - 1)
+        local_idx = t - window_idx
+        local_idx = min(max(local_idx, 0), seq_len - 1)
+        output[t] = data[window_idx, local_idx]
 
     return output
+
+
+def detemporalize(
+    data: np.ndarray,
+    window_size: int,
+    method: DetemporalizeMethod = "mean",
+) -> np.ndarray:
+    """Reconstruct original time series from overlapping windows."""
+    if method == "mean":
+        return _detemporalize_mean(data, window_size)
+    if method == "center":
+        return _detemporalize_center(data, window_size)
+    raise ValueError(f"Unknown detemporalize method '{method}'")
 
 
 def combine_inputs_to_model(

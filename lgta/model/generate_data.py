@@ -1,5 +1,12 @@
+"""
+Synthetic data generation through latent space perturbation. Applies
+transformations (jitter, scaling, magnitude_warp, time_warp) to the CVAE
+latent code z via ManipulateData, then decodes back to data space.
+"""
+
 import numpy as np
 import torch
+from typing import Literal
 from lgta.transformations import ManipulateData
 from lgta.feature_engineering.feature_transformations import detemporalize
 from lgta.transformations.apply_transformations_benchmark import (
@@ -8,34 +15,60 @@ from lgta.transformations.apply_transformations_benchmark import (
 from lgta.utils.helper import reshape_datasets, clip_datasets
 
 
-def generate_synthetic_data(model, z, create_dataset_vae, transformation, params):
-    """
-    Generates synthetic data by applying a transformation to the latent space
-    representation v' = T(v, eta), then decoding through the CVAE decoder.
+def _normalize_latent(
+    z: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Normalize z to unit scale so non-additive transforms are meaningful."""
+    mu = z.mean(axis=0)
+    std = z.std(axis=0)
+    std = np.where(std < 1e-8, 1.0, std)
+    return (z - mu) / std, mu, std
 
-    z has shape (n_windows, window_size, latent_dim) for per-timestep latent variables.
+
+def generate_synthetic_data(
+    model,
+    z_mean: np.ndarray,
+    create_dataset_vae,
+    transformation: str,
+    params: list[float],
+    detemporalize_method: Literal["mean", "center"] = "mean",
+    clip_to_unit_interval: bool = False,
+) -> np.ndarray:
+    """
+    Generate synthetic data by perturbing the latent code z_mean with any
+    registered transformation, then decoding through the CVAE decoder.
+
+    Transformations are applied in normalized (unit-scale) space so that
+    multiplicative and interpolation-based transforms produce meaningful
+    perturbations. Only the perturbation delta is extracted and added to the
+    original z_mean, preserving the decoder's expected input range.
     """
     device = next(model.parameters()).device
 
-    dynamic_features_np, _ = create_dataset_vae.input_data
+    z_norm, _, _ = _normalize_latent(z_mean)
+    z_transf = ManipulateData(
+        x=z_norm, transformation=transformation, parameters=list(params),
+    ).apply_transf()
+    z_modified = z_mean + (z_transf - z_norm)
 
-    original_shape = z.shape
-    z_2d = z.reshape(z.shape[0], -1)
-    manipulate_data = ManipulateData(z_2d, transformation, list(params))
-    z_modified = manipulate_data.apply_transf().reshape(original_shape)
+    dynamic_features_np = create_dataset_vae.input_data[0][0]
 
     model.eval()
     with torch.no_grad():
         z_tensor = torch.tensor(z_modified, dtype=torch.float32, device=device)
         dyn_tensor = torch.tensor(
-            dynamic_features_np[0], dtype=torch.float32, device=device
+            dynamic_features_np, dtype=torch.float32, device=device
         )
         preds = model.decoder(z_tensor, dyn_tensor).cpu().numpy()
 
-    preds = detemporalize(preds, create_dataset_vae.window_size)
-    X_hat = create_dataset_vae.scaler_target.inverse_transform(preds)
-
-    return X_hat
+    preds = detemporalize(
+        preds,
+        create_dataset_vae.window_size,
+        method=detemporalize_method,
+    )
+    if clip_to_unit_interval:
+        preds = np.clip(preds, 0.0, 1.0)
+    return create_dataset_vae.scaler_target.inverse_transform(preds)
 
 
 def generate_datasets(

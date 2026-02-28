@@ -1,7 +1,8 @@
 """
 Time series augmentation transformations applied to raw data or latent space
-representations. Each transformation is parameterized by a sigma value controlling
-the magnitude of the perturbation.
+representations. Every transformation is parameterized by a single sigma value
+that directly controls the perturbation magnitude, keeping all transformations
+on the same conceptual scale.
 """
 
 from scipy.interpolate import CubicSpline
@@ -31,11 +32,8 @@ class ManipulateData:
         self.sigma = parameters[0] if parameters else 0.0
 
     def _jitter(self) -> np.ndarray:
-        computed_sigma = np.std(self.x, axis=0) / 4 * self.sigma
-        threshold = 0.1
-        sigma = np.where(computed_sigma < threshold, self.sigma, computed_sigma)
         return self.x + np.random.normal(
-            loc=0.0, scale=sigma, size=(self.x.shape[0], self.x.shape[1])
+            loc=0.0, scale=self.sigma, size=self.x.shape
         )
 
     def _scaling(self) -> np.ndarray:

@@ -1,83 +1,63 @@
 """
-Generation of new time series by sampling from the CVAE latent space and
-optionally applying sequential transformation chains to the latent samples.
-
-Follows the theory: v'_i = T_n(...T_2(T_1(v_i, eta_1), eta_2)..., eta_n)
+Generation of new time series by applying transformation chains to the
+CVAE latent code and decoding. Delegates to generate_synthetic_data for
+the actual generation to maintain a single code path.
 """
 
-from typing import Optional
-import torch
-import torch.nn as nn
-from sklearn.preprocessing import MinMaxScaler
+from typing import Literal, Optional
 import numpy as np
-from lgta.feature_engineering.feature_transformations import detemporalize
-from lgta.transformations.manipulate_data import ManipulateData
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from lgta.model.generate_data import generate_synthetic_data
 
 
 def generate_new_time_series(
-    cvae: nn.Module,
+    cvae,
     z_mean: np.ndarray,
     z_log_var: np.ndarray,
     window_size: int,
     dynamic_features_inp: np.ndarray,
-    scaler_target: MinMaxScaler,
-    n_features: int,
+    scaler_target,
     n: int,
     transformations: Optional[list[str]] = None,
     transf_params: Optional[list[float]] = None,
-    device: Optional[torch.device] = None,
+    device=None,
+    sample_from_posterior: bool = False,
+    detemporalize_method: Literal["mean", "center"] = "mean",
+    clip_to_unit_interval: bool = False,
 ) -> np.ndarray:
     """
-    Generate new time series by sampling per-timestep latent variables from
-    the CVAE and optionally applying a chain of transformations.
+    Generate new time series by optionally sampling from the posterior,
+    then applying a chain of transformations to the latent code.
 
-    Args:
-        cvae: A trained CVAE model.
-        z_mean: Mean of latent distributions, shape (n_windows, window_size, latent_dim).
-        z_log_var: Log-variance of latent distributions, same shape.
-        window_size: Size of the rolling window.
-        dynamic_features_inp: Dynamic features, shape (n_windows, window_size, n_dyn_features).
-        scaler_target: Fitted scaler for inverse-transforming predictions.
-        n_features: Number of output features.
-        n: Total number of time points.
-        transformations: List of transformation names to chain on latent samples.
-        transf_params: Corresponding parameters for each transformation.
-        device: Torch device for inference.
-
-    Returns:
-        Generated time series of shape (n, n_features).
+    Kept for backward compatibility but delegates to generate_synthetic_data.
     """
+    if sample_from_posterior:
+        z_std = np.exp(z_log_var * 0.5)
+        z_input = np.random.normal(z_mean, z_std)
+    else:
+        z_input = z_mean.copy()
+
+    if transformations is not None:
+        for transformation, param in zip(transformations, transf_params):
+            from lgta.transformations.manipulate_data import ManipulateData
+            z_input = ManipulateData(
+                x=z_input, transformation=transformation, parameters=[param],
+            ).apply_transf()
+
+    import torch
     if device is None:
         device = torch.device("cpu")
 
-    latent_dim = z_mean.shape[-1]
-    z_std = np.exp(z_log_var * 0.5)
-
-    dec_pred = []
-
     cvae.eval()
     with torch.no_grad():
-        for id_seq in range(n - window_size + 1):
-            v = np.random.normal(z_mean[id_seq], z_std[id_seq])
+        z_tensor = torch.tensor(z_input, dtype=torch.float32, device=device)
+        dyn_tensor = torch.tensor(
+            dynamic_features_inp, dtype=torch.float32, device=device
+        )
+        preds = cvae.decoder(z_tensor, dyn_tensor).cpu().numpy()
 
-            if transformations is not None:
-                for transformation, param in zip(transformations, transf_params):
-                    v = ManipulateData(
-                        x=v, transformation=transformation, parameters=[param]
-                    ).apply_transf()
-
-            d_feat = dynamic_features_inp[id_seq : id_seq + 1, :, :]
-            v_tensor = torch.tensor(
-                v.reshape(1, window_size, latent_dim),
-                dtype=torch.float32,
-                device=device,
-            )
-            d_tensor = torch.tensor(d_feat, dtype=torch.float32, device=device)
-
-            pred = cvae.decoder(v_tensor, d_tensor)
-            dec_pred.append(pred.cpu().numpy())
-
-    dec_pred_hat = detemporalize(np.squeeze(np.array(dec_pred)), window_size)
-    dec_pred_hat = scaler_target.inverse_transform(dec_pred_hat)
-
-    return dec_pred_hat
+    from lgta.feature_engineering.feature_transformations import detemporalize
+    preds = detemporalize(preds, window_size, method=detemporalize_method)
+    if clip_to_unit_interval:
+        preds = np.clip(preds, 0.0, 1.0)
+    return scaler_target.inverse_transform(preds)
