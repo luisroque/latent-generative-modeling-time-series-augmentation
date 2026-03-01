@@ -24,14 +24,15 @@ class CreateTransformedVersions:
         self.dataset_name = dataset_name
         self.freq = freq
         self.input_dir = input_dir
-        self.transformations = ["jitter", "scaling", "magnitude_warp", "time_warp"]
+        self.transformations = ["jitter", "scaling", "magnitude_warp", "drift", "trend"]
         self.transformations_w_random = self.transformations.copy()
         self.transformations_w_random.insert(0, "random")
         self.parameters = {
             "jitter": 0.5,
             "scaling": 0.02,
             "magnitude_warp": 0.02,
-            "time_warp": 0.02,
+            "drift": 0.5,
+            "trend": 0.5,
         }
         self.data = self._get_dataset()
         self.s = self.data["train"]["s"]  # number of series in dataset

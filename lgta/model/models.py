@@ -1,15 +1,15 @@
 """
 L-GTA model architecture: Conditional Variational Autoencoder (CVAE) with
-a global latent code per window.
+a per-timestep temporal latent code.
 
-Encoder: concat(x, c) -> BiLSTM -> BN -> SelfAttn+PosEmbed -> MeanPool
-         -> Dense(relu) -> BN -> (mu, log_var) -> z
-Decoder: RepeatVector(z) + c -> BiLSTM -> Flatten -> Dense -> Reshape -> x_hat
+Encoder: concat(x, c) -> BiLSTM -> LN -> SelfAttn+PosEmbed (no pooling)
+         -> Dense(relu) -> LN -> (mu, log_var) -> z   [shape: (B, W, d)]
+Decoder: concat(z, c) -> BiLSTM -> z_skip -> FC -> x_hat
 
-The encoder produces a single global latent code z per window by mean-pooling
-the temporal dimension after self-attention. This ensures perturbations to z
-produce coherent, controlled changes across all timesteps. The decoder uses
-dynamic features to recover temporal structure from the global code.
+The encoder produces a per-timestep latent code z of shape (B, W, latent_dim)
+so that temporal transformations applied in latent space preserve their
+character through decoding. Self-attention provides global context across
+timesteps while retaining each timestep's individual latent identity.
 """
 
 from enum import Enum
@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .helper import Sampling
+from .equivariance import sample_perturbation, compute_equivariance_loss
 
 
 class EncoderType(str, Enum):
@@ -40,11 +41,11 @@ class PositionalEmbedding(nn.Module):
         return inputs + self.pos_embedding[:seq_len, :].unsqueeze(0)
 
 
-class TransformerPooling(nn.Module):
-    """Self-attention with positional encoding followed by temporal mean pooling.
+class TemporalSelfAttention(nn.Module):
+    """Self-attention with positional encoding that preserves per-timestep outputs.
 
-    Attends across timesteps to capture long-range dependencies, then
-    mean-pools to produce a single global context vector per sample.
+    Each timestep attends to all others for global context but retains its
+    own representation, enabling the latent space to carry temporal structure.
     """
 
     def __init__(
@@ -84,15 +85,15 @@ class TransformerPooling(nn.Module):
         ffn_out = self.ffn(x)
         ffn_out = self.drop2(ffn_out)
         x = self.ln2(x + ffn_out)
-        return x.mean(dim=1)
+        return x
 
 
 class Encoder(nn.Module):
-    """BiLSTM encoder with self-attention pooling producing a global latent code.
+    """BiLSTM encoder with self-attention producing a per-timestep latent code.
 
     Concatenates dynamic features with the raw input, processes through BiLSTM
-    and self-attention, then mean-pools across time to produce a single z per
-    window — ensuring latent perturbations affect all timesteps coherently.
+    and self-attention (no temporal pooling), then projects each timestep
+    independently to (z_mean, z_log_var). Output z has shape (B, W, latent_dim).
     """
 
     def __init__(
@@ -116,7 +117,7 @@ class Encoder(nn.Module):
         )
         self.ln_lstm = nn.LayerNorm(n_main_features)
 
-        self.transformer = TransformerPooling(
+        self.transformer = TemporalSelfAttention(
             embed_dim=n_main_features,
             num_heads=num_heads,
             ff_dim=ff_dim,
@@ -146,10 +147,10 @@ class Encoder(nn.Module):
         h = (h[:, :, : self.n_main_features] + h[:, :, self.n_main_features :]) / 2.0
         h = self.ln_lstm(h)
 
-        context = self.transformer(h)
-        context = self.dropout(context)
+        h = self.transformer(h)
+        h = self.dropout(h)
 
-        enc = F.relu(self.dense_latent(context))
+        enc = F.relu(self.dense_latent(h))
         enc = self.ln_latent(enc)
 
         z_mean = self.z_mean_layer(enc)
@@ -159,10 +160,11 @@ class Encoder(nn.Module):
 
 
 class SimpleEncoder(nn.Module):
-    """BiLSTM encoder with mean pooling (no self-attention) for a global latent code.
+    """BiLSTM encoder without self-attention producing a per-timestep latent code.
 
-    Simpler alternative to Encoder that skips TransformerPooling, using direct
-    temporal mean pooling of BiLSTM hidden states instead.
+    Simpler alternative to Encoder that skips self-attention. The BiLSTM still
+    provides cross-timestep context, and each timestep is projected
+    independently to (z_mean, z_log_var). Output z has shape (B, W, latent_dim).
     """
 
     def __init__(
@@ -206,10 +208,9 @@ class SimpleEncoder(nn.Module):
         h = (h[:, :, : self.n_main_features] + h[:, :, self.n_main_features :]) / 2.0
         h = self.ln_lstm(h)
 
-        context = h.mean(dim=1)
-        context = self.dropout(context)
+        h = self.dropout(h)
 
-        enc = F.relu(self.dense_latent(context))
+        enc = F.relu(self.dense_latent(h))
         enc = self.ln_latent(enc)
 
         z_mean = self.z_mean_layer(enc)
@@ -219,16 +220,13 @@ class SimpleEncoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """BiLSTM decoder that reconstructs temporal output from a global latent code.
+    """BiLSTM decoder that reconstructs temporal output from a temporal latent code.
 
-    Broadcasts z across time via RepeatVector, concatenates with dynamic
-    features for temporal position, processes through BiLSTM for temporal
-    coherence, then applies a dense projection to reconstruct the window.
-
-    A linear skip connection (z_proj) projects z directly into the LSTM
-    hidden-state space and adds it before the final FC layer. This
-    guarantees a linear path from latent perturbations to the output,
-    preserving controllability even when LSTM gates saturate.
+    Receives z of shape (B, W, latent_dim) with per-timestep latent values,
+    concatenates with dynamic features, processes through BiLSTM, and applies
+    a dense projection to reconstruct the window. A linear skip connection
+    (z_proj) projects z per-timestep into the LSTM hidden-state space,
+    guaranteeing a direct path from latent perturbations to the output.
     """
 
     def __init__(
@@ -268,13 +266,12 @@ class Decoder(nn.Module):
     def forward(
         self, z: torch.Tensor, dyn_inp: torch.Tensor
     ) -> torch.Tensor:
-        z_repeated = z.unsqueeze(1).expand(-1, self.window_size, -1)
-        dec_inp = torch.cat([z_repeated, dyn_inp], dim=-1)
+        dec_inp = torch.cat([z, dyn_inp], dim=-1)
 
         h, _ = self.lstm(dec_inp)
         h = (h[:, :, : self.n_main_features] + h[:, :, self.n_main_features :]) / 2.0
 
-        z_skip = self.z_proj(z).unsqueeze(1).expand(-1, self.window_size, -1)
+        z_skip = self.z_proj(z)
         h = h + z_skip
 
         h_flat = h.reshape(h.shape[0], -1)
@@ -283,7 +280,8 @@ class Decoder(nn.Module):
 
 
 class CVAE(nn.Module):
-    """Conditional Variational Autoencoder with global latent code."""
+    """Conditional Variational Autoencoder with temporal latent code and
+    optional equivariance regularization for the decoder."""
 
     def __init__(
         self,
@@ -292,6 +290,7 @@ class CVAE(nn.Module):
         window_size: int,
         kl_weight: float = 1.0,
         free_bits: float = 0.0,
+        equiv_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.encoder = encoder
@@ -299,6 +298,7 @@ class CVAE(nn.Module):
         self.window_size = window_size
         self.kl_weight = kl_weight
         self.free_bits = free_bits
+        self.equiv_weight = equiv_weight
 
     def forward(
         self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
@@ -318,13 +318,30 @@ class CVAE(nn.Module):
         )
         if self.free_bits > 0.0:
             kl_per_dim = torch.clamp(kl_per_dim, min=self.free_bits)
-        kl_loss = torch.mean(torch.sum(kl_per_dim, dim=1))
-        total_loss = reconstruction_loss + self.kl_weight * kl_loss
+        kl_loss = torch.mean(kl_per_dim.sum(dim=-1))
+
+        equiv_loss = torch.tensor(0.0, device=pred.device)
+        if self.equiv_weight > 0.0:
+            perturbation = sample_perturbation(
+                batch_size=z_mean.shape[0],
+                window_size=self.window_size,
+                device=z_mean.device,
+            )
+            equiv_loss = compute_equivariance_loss(
+                self.decoder, z_mean, dynamic_features, perturbation,
+            )
+
+        total_loss = (
+            reconstruction_loss
+            + self.kl_weight * kl_loss
+            + self.equiv_weight * equiv_loss
+        )
 
         return {
             "loss": total_loss,
             "reconstruction_loss": reconstruction_loss,
             "kl_loss": kl_loss,
+            "equiv_loss": equiv_loss,
         }
 
 

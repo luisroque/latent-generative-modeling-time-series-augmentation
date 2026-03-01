@@ -270,6 +270,7 @@ class CreateTransformedVersionsCVAE:
         spectral_norm: bool = False,
         cyclical_kl: bool = False,
         cyclical_kl_cycle_length: int = 50,
+        equiv_weight: float = 0.0,
     ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
         Training our CVAE on the dataset supplied.
@@ -295,6 +296,7 @@ class CreateTransformedVersionsCVAE:
             encoder, decoder, self.window_size,
             kl_weight=0.0,
             free_bits=free_bits,
+            equiv_weight=equiv_weight,
         )
         cvae = cvae.to(self.device)
 
@@ -333,6 +335,7 @@ class CreateTransformedVersionsCVAE:
             "loss": [],
             "reconstruction_loss": [],
             "kl_loss": [],
+            "equiv_loss": [],
             "kl_weight": [],
         }
 
@@ -368,6 +371,7 @@ class CreateTransformedVersionsCVAE:
             epoch_loss = 0.0
             epoch_recon = 0.0
             epoch_kl = 0.0
+            epoch_equiv = 0.0
             n_batches = 0
 
             for dyn_feat, x_inp in dataloader:
@@ -385,15 +389,18 @@ class CreateTransformedVersionsCVAE:
                 epoch_loss += losses["loss"].item()
                 epoch_recon += losses["reconstruction_loss"].item()
                 epoch_kl += losses["kl_loss"].item()
+                epoch_equiv += losses["equiv_loss"].item()
                 n_batches += 1
 
             avg_loss = epoch_loss / n_batches
             avg_recon = epoch_recon / n_batches
             avg_kl = epoch_kl / n_batches
+            avg_equiv = epoch_equiv / n_batches
 
             history["loss"].append(avg_loss)
             history["reconstruction_loss"].append(avg_recon)
             history["kl_loss"].append(avg_kl)
+            history["equiv_loss"].append(avg_equiv)
             history["kl_weight"].append(kl_weight)
 
             annealing_done = cyclical_kl or epoch >= kl_anneal_epochs
@@ -406,9 +413,10 @@ class CreateTransformedVersionsCVAE:
                 best_state = {k: v.cpu().clone() for k, v in cvae.state_dict().items()}
                 torch.save(best_state, weights_file)
                 current_lr = optimizer.param_groups[0]["lr"]
+                equiv_str = f", eq={avg_equiv:.6f}" if equiv_weight > 0 else ""
                 print(
                     f"Epoch {epoch + 1}: loss={avg_loss:.6f} "
-                    f"(recon={avg_recon:.6f}, kl={avg_kl:.6f}, "
+                    f"(recon={avg_recon:.6f}, kl={avg_kl:.6f}{equiv_str}, "
                     f"kl_w={kl_weight:.4f}, "
                     f"lr={current_lr:.2e}) - saving"
                 )

@@ -13,13 +13,13 @@ def reshape_datasets(
     - X_hat: numpy.ndarray, dataset from VAE transformation.
     - transformed_benchmark: numpy.ndarray, benchmark transformed dataset.
     - vae_n_samples: int, the number of samples in the VAE dataset.
-    - benchmark_transf: str, the type of benchmark transformation to apply ('jitter', 'scaling', 'magnitude_warp', 'time_warp').
+    - benchmark_transf: str, the type of benchmark transformation to apply.
 
     Returns:
     - X_hat_transf: Reshaped VAE transformed dataset.
     - transformed_benchmark_specific: Reshaped specific benchmark dataset.
     """
-    transformations = {"jitter": 0, "scaling": 1, "magnitude_warp": 2, "time_warp": 3}
+    transformations = {"jitter": 0, "scaling": 1, "magnitude_warp": 2, "drift": 3, "trend": 4}
 
     # Check if benchmark_transf is a valid key
     if benchmark_transf not in transformations:

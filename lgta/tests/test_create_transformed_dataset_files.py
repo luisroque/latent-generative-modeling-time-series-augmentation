@@ -19,14 +19,15 @@ class TestCreateTransformedDatasets(unittest.TestCase):
             "jitter": 0.5,
             "scaling": 0.1,
             "magnitude_warp": 0.05,
-            "time_warp": 0.05,
+            "drift": 0.5,
+            "trend": 0.5,
         }
         self.transformed_datasets.create_new_version_single_transf()
         np.random.seed(0)
 
     def test_create_correct_number_transformed_datasets_single_transf(self):
         self.assertEqual(
-            self.transformed_datasets.y_new_all.shape, (4, 6, 10, 36, 56)
+            self.transformed_datasets.y_new_all.shape, (5, 6, 10, 36, 56)
         )
 
     def test_create_correct_number_transformed_datasets_FILES_single_transf(self):
@@ -46,22 +47,22 @@ class TestCreateTransformedDatasets(unittest.TestCase):
             transformed_datasets.y_loaded_transformed.shape, (6, 10, 36, 56)
         )
 
-    def test_create_transformations_with_tourism_small_dataset(self):
-        mean_sim_time_warp_version_1 = ComputeSimilarities(
+    def test_create_transformations_with_tourism_small_dataset_drift(self):
+        mean_sim_drift_version_1 = ComputeSimilarities(
             dataset=self.transformed_datasets.y,
             transf_dataset=self.transformed_datasets.y_new_all[3, 0, 9],
         ).compute_mean_similarity_elementwise()
 
-        mean_sim_time_warp_version_6 = ComputeSimilarities(
+        mean_sim_drift_version_6 = ComputeSimilarities(
             dataset=self.transformed_datasets.y,
             transf_dataset=self.transformed_datasets.y_new_all[3, 5, 9],
         ).compute_mean_similarity_elementwise()
 
-        self.assertGreater(mean_sim_time_warp_version_6, mean_sim_time_warp_version_1)
+        self.assertGreater(mean_sim_drift_version_6, mean_sim_drift_version_1)
 
     def test_create_transformations_compare_with_files(self):
         vi = Visualizer(self.dataset)
-        vi._read_files(method="single_transf_time_warp")
+        vi._read_files(method="single_transf_drift")
 
         mean_sim = ComputeSimilarities(
             dataset=self.transformed_datasets.y_new_all[3, 5, 9][:, 10].reshape(-1, 1),

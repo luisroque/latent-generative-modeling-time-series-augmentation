@@ -31,6 +31,7 @@ class SweepConfig:
     latent_dim: int = 16
     kl_anneal_epochs: int = 100
     kl_weight_max: float = 0.1
+    equiv_weight: float = 0.0
     scaler_type: str = "standard"
     output_dir: Path = field(
         default_factory=lambda: Path("assets/results/monotonic_response")
@@ -87,6 +88,7 @@ def train_model(config: SweepConfig) -> PretrainedComponents:
         kl_anneal_epochs=config.kl_anneal_epochs,
         kl_weight_max=config.kl_weight_max,
         load_weights=config.load_weights,
+        equiv_weight=config.equiv_weight,
     )
     X_recon, _, z_mean, _ = vae_creator.predict(
         model,
@@ -332,7 +334,8 @@ ALL_TRANSFORMATIONS: list[str] = [
     "jitter",
     "scaling",
     "magnitude_warp",
-    "time_warp",
+    "drift",
+    "trend",
 ]
 
 
@@ -341,7 +344,7 @@ def _run_sweep_for_transformation(
     pretrained: PretrainedComponents,
     transformation: str,
     base_output_dir: Path,
-) -> None:
+) -> SweepResults:
     config.transformation = transformation
     config.output_dir = base_output_dir / transformation
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -355,6 +358,44 @@ def _run_sweep_for_transformation(
         series_idx=config.series_to_plot,
     )
     print_controllability_report(results)
+    return results
+
+
+def _run_signature_analysis(
+    all_results: dict[str, SweepResults],
+    base_output_dir: Path,
+    series_idx: int,
+) -> None:
+    """Compute fingerprints for each transformation and produce comparison
+    plots and reports that prove LGTA preserves the transformation character."""
+    from lgta.experiments.transformation_signatures import (
+        compute_fingerprint,
+        plot_fingerprint_comparison,
+        plot_residual_comparison,
+        print_signature_report,
+    )
+
+    transformations = list(all_results.keys())
+    X_orig = all_results[transformations[0]].X_orig
+
+    lgta_fps = {}
+    direct_fps = {}
+    lgta_samples = {}
+    direct_samples = {}
+
+    for t in transformations:
+        r = all_results[t]
+        lgta_fps[t] = compute_fingerprint(X_orig, r.lgta_samples[-1])
+        direct_fps[t] = compute_fingerprint(X_orig, r.direct_samples[-1])
+        lgta_samples[t] = r.lgta_samples[-1]
+        direct_samples[t] = r.direct_samples[-1]
+
+    print_signature_report(transformations, lgta_fps, direct_fps)
+    plot_fingerprint_comparison(transformations, lgta_fps, direct_fps, base_output_dir)
+    plot_residual_comparison(
+        X_orig, lgta_samples, direct_samples, transformations,
+        series_idx, base_output_dir,
+    )
 
 
 if __name__ == "__main__":
@@ -366,9 +407,16 @@ if __name__ == "__main__":
         epochs=1500,
         kl_anneal_epochs=100,
         kl_weight_max=0.1,
+        equiv_weight=1.0,
         scaler_type="standard",
         load_weights=False,
     )
     pretrained = train_model(config)
+
+    all_results: dict[str, SweepResults] = {}
     for transf in ALL_TRANSFORMATIONS:
-        _run_sweep_for_transformation(config, pretrained, transf, base_dir)
+        all_results[transf] = _run_sweep_for_transformation(
+            config, pretrained, transf, base_dir,
+        )
+
+    _run_signature_analysis(all_results, base_dir, config.series_to_plot)

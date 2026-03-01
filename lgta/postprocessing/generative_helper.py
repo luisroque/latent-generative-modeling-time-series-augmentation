@@ -1,13 +1,13 @@
 """
 Generation of new time series by applying transformation chains to the
-CVAE latent code and decoding. Delegates to generate_synthetic_data for
-the actual generation to maintain a single code path.
+CVAE temporal latent code and decoding. Transformations are applied in
+detemporalized latent space (true time axis) then re-temporalized for
+decoding, matching the pipeline in generate_synthetic_data.
 """
 
 from typing import Literal, Optional
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from lgta.model.generate_data import generate_synthetic_data
 
 
 def generate_new_time_series(
@@ -27,10 +27,18 @@ def generate_new_time_series(
 ) -> np.ndarray:
     """
     Generate new time series by optionally sampling from the posterior,
-    then applying a chain of transformations to the latent code.
+    then applying transformations in the detemporalized latent space.
 
-    Kept for backward compatibility but delegates to generate_synthetic_data.
+    z_mean has shape (n_windows, window_size, latent_dim). Transformations
+    are applied along the true time axis by detemporalizing to
+    (n_timesteps, latent_dim), transforming, then re-temporalizing.
     """
+    from lgta.feature_engineering.feature_transformations import (
+        detemporalize,
+        temporalize,
+    )
+    from lgta.model.generate_data import _normalize_latent
+
     if sample_from_posterior:
         z_std = np.exp(z_log_var * 0.5)
         z_input = np.random.normal(z_mean, z_std)
@@ -38,11 +46,18 @@ def generate_new_time_series(
         z_input = z_mean.copy()
 
     if transformations is not None:
+        z_full = detemporalize(z_input, window_size, method="mean")
+        z_norm, _, _ = _normalize_latent(z_full)
+
         for transformation, param in zip(transformations, transf_params):
             from lgta.transformations.manipulate_data import ManipulateData
-            z_input = ManipulateData(
-                x=z_input, transformation=transformation, parameters=[param],
+            z_transf = ManipulateData(
+                x=z_norm, transformation=transformation, parameters=[param],
             ).apply_transf()
+            z_full = z_full + (z_transf - z_norm)
+            z_norm, _, _ = _normalize_latent(z_full)
+
+        z_input = temporalize(z_full, window_size)
 
     import torch
     if device is None:
@@ -56,7 +71,6 @@ def generate_new_time_series(
         )
         preds = cvae.decoder(z_tensor, dyn_tensor).cpu().numpy()
 
-    from lgta.feature_engineering.feature_transformations import detemporalize
     preds = detemporalize(preds, window_size, method=detemporalize_method)
     if clip_to_unit_interval:
         preds = np.clip(preds, 0.0, 1.0)
