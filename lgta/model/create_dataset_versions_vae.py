@@ -11,7 +11,7 @@ from torch.utils.data import Dataset as TorchDataset, DataLoader
 from pathlib import Path
 from typing import Literal, Optional, Union
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from lgta.model.models import CVAE, EncoderType, get_CVAE
+from lgta.model.models import CVAE, EncoderType, LatentMode, get_CVAE
 from lgta.feature_engineering.dynamic_features import (
     create_dynamic_features,
 )
@@ -25,6 +25,7 @@ from lgta.visualization.model_visualization import (
     plot_generated_vs_original,
 )
 from lgta.preprocessing.pre_processing_datasets import (
+    DATA_DIR,
     PreprocessDatasets as ppc,
 )
 from lgta import __version__
@@ -192,15 +193,17 @@ class CreateTransformedVersionsCVAE:
         ).apply_preprocess()
 
     def _create_directories(self):
-        Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}assets/data/transformed_datasets").mkdir(
+        Path(self.input_dir, DATA_DIR).mkdir(parents=True, exist_ok=True)
+        Path(self.input_dir, DATA_DIR, "transformed_datasets").mkdir(
             parents=True, exist_ok=True
         )
-        Path(f"{self.input_dir}assets/model_weights").mkdir(parents=True, exist_ok=True)
+        Path(self.input_dir, "assets", "model_weights").mkdir(
+            parents=True, exist_ok=True
+        )
 
     def _save_original_file(self):
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
+            str(Path(self.input_dir, DATA_DIR, "transformed_datasets", f"{self.dataset_name}_original.npy")),
             "wb",
         ) as f:
             np.save(f, self.y)
@@ -214,7 +217,7 @@ class CreateTransformedVersionsCVAE:
         method: str = "single_transf",
     ) -> None:
         with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
+            str(Path(self.input_dir, DATA_DIR, "transformed_datasets", f"{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy")),
             "wb",
         ) as f:
             np.save(f, y_new)
@@ -271,6 +274,7 @@ class CreateTransformedVersionsCVAE:
         cyclical_kl: bool = False,
         cyclical_kl_cycle_length: int = 50,
         equiv_weight: float = 0.0,
+        latent_mode: LatentMode = LatentMode.TEMPORAL,
     ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
         Training our CVAE on the dataset supplied.
@@ -290,6 +294,7 @@ class CreateTransformedVersionsCVAE:
             latent_dim=latent_dim,
             encoder_type=encoder_type,
             spectral_norm=spectral_norm,
+            latent_mode=latent_mode,
         )
 
         cvae = CVAE(
@@ -297,6 +302,7 @@ class CreateTransformedVersionsCVAE:
             kl_weight=0.0,
             free_bits=free_bits,
             equiv_weight=equiv_weight,
+            latent_mode=latent_mode,
         )
         cvae = cvae.to(self.device)
 

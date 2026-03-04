@@ -1,15 +1,18 @@
 """
-Synthetic data generation through temporal latent space perturbation.
-The CVAE produces a per-timestep latent code z of shape (n_win, W, d).
-To apply transformations along true time, z is detemporalized into a
-full latent time series (n_timesteps, d), transformed, re-temporalized,
-and decoded back to data space.
+Synthetic data generation through latent space perturbation.
+
+In TEMPORAL mode the CVAE produces z of shape (n_win, W, d). The code
+detemporalizes to (n_timesteps, d), transforms along true time,
+re-temporalizes, and decodes. In GLOBAL mode z is (n_win, d); the
+transform is applied directly and the decoder broadcasts z to (B, W, d)
+internally.
 """
 
 import numpy as np
 import torch
 from typing import Literal
 from lgta.transformations import ManipulateData
+from lgta.model.models import LatentMode
 from lgta.feature_engineering.feature_transformations import (
     detemporalize,
     temporalize,
@@ -38,34 +41,38 @@ def generate_synthetic_data(
     params: list[float],
     detemporalize_method: Literal["mean", "center"] = "mean",
     clip_to_unit_interval: bool = False,
+    latent_mode: LatentMode = LatentMode.TEMPORAL,
 ) -> np.ndarray:
-    """
-    Generate synthetic data by perturbing the temporal latent code z_mean
-    along the true time axis, then decoding through the CVAE decoder.
+    """Generate synthetic data by perturbing latent code z_mean then decoding.
 
-    z_mean has shape (n_windows, window_size, latent_dim). It is first
-    detemporalized to (n_timesteps, latent_dim) so that transformations
-    operate along real time. The perturbation delta is extracted, added
-    to the original, re-temporalized, and decoded.
+    In TEMPORAL mode, z_mean is (n_windows, W, latent_dim) and is
+    detemporalized before transforming. In GLOBAL mode, z_mean is
+    (n_windows, latent_dim) and is transformed directly.
     """
     device = next(model.parameters()).device
     window_size = create_dataset_vae.window_size
 
-    z_full = detemporalize(z_mean, window_size, method="mean")
-
-    z_norm, _, _ = _normalize_latent(z_full)
-    z_transf = ManipulateData(
-        x=z_norm, transformation=transformation, parameters=list(params),
-    ).apply_transf()
-    z_modified = z_full + (z_transf - z_norm)
-
-    z_windows = temporalize(z_modified, window_size)
+    if latent_mode == LatentMode.GLOBAL:
+        z_norm, _, _ = _normalize_latent(z_mean)
+        z_transf = ManipulateData(
+            x=z_norm, transformation=transformation, parameters=list(params),
+        ).apply_transf()
+        z_modified = z_mean + (z_transf - z_norm)
+        z_decode = z_modified
+    else:
+        z_full = detemporalize(z_mean, window_size, method="mean")
+        z_norm, _, _ = _normalize_latent(z_full)
+        z_transf = ManipulateData(
+            x=z_norm, transformation=transformation, parameters=list(params),
+        ).apply_transf()
+        z_modified = z_full + (z_transf - z_norm)
+        z_decode = temporalize(z_modified, window_size)
 
     dynamic_features_np = create_dataset_vae.input_data[0][0]
 
     model.eval()
     with torch.no_grad():
-        z_tensor = torch.tensor(z_windows, dtype=torch.float32, device=device)
+        z_tensor = torch.tensor(z_decode, dtype=torch.float32, device=device)
         dyn_tensor = torch.tensor(
             dynamic_features_np, dtype=torch.float32, device=device
         )

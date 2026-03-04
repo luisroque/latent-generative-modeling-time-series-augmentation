@@ -1,11 +1,10 @@
-from ..preprocessing.pre_processing_datasets import PreprocessDatasets as ppc
+from pathlib import Path
+
+from ..preprocessing.pre_processing_datasets import DATA_DIR, PreprocessDatasets as ppc
 from lgta.transformations.manipulate_data import ManipulateData
 import numpy as np
 from lgta.visualization.visualize_transformed_datasets import Visualizer
 from .compute_similarities_summary_metrics import ComputeSimilaritiesSummaryMetrics
-from pathlib import Path
-
-
 class CreateTransformedVersions:
     """
     A class used to create new datasets from an original one using time series augmentation techniques
@@ -72,24 +71,22 @@ class CreateTransformedVersions:
         self.y_loaded_transformed = None
 
     def _create_directories(self):
-        # Create directory to store transformed datasets if does not exist
-        Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}assets/data/transformed_datasets").mkdir(
+        Path(self.input_dir, DATA_DIR).mkdir(parents=True, exist_ok=True)
+        Path(self.input_dir, DATA_DIR, "transformed_datasets").mkdir(
             parents=True, exist_ok=True
         )
 
     def _save_original_file(self):
-        with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
-            "wb",
-        ) as f:
+        path = Path(self.input_dir, DATA_DIR, "transformed_datasets", f"{self.dataset_name}_original.npy")
+        with open(path, "wb") as f:
             np.save(f, self.y)
 
     def _save_version_file(self, y_new, version, sample, transformation, method):
-        with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
-            "wb",
-        ) as f:
+        path = Path(
+            self.input_dir, DATA_DIR, "transformed_datasets",
+            f"{self.dataset_name}_version_{version}_{sample}samples_{method}_{transformation}_{self.transf_data}.npy",
+        )
+        with open(path, "wb") as f:
             np.save(f, y_new)
 
     def _get_dataset(self):
@@ -125,18 +122,17 @@ class CreateTransformedVersions:
         return y_new
 
     def read_groups_transformed(self, method):
-        with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_original.npy",
-            "rb",
-        ) as f:
+        path_orig = Path(self.input_dir, DATA_DIR, "transformed_datasets", f"{self.dataset_name}_original.npy")
+        with open(path_orig, "rb") as f:
             self.y_loaded_original = np.load(f)
 
         y_new = []
         for version in range(1, self.n_versions + 1):
-            with open(
-                f"{self.input_dir}assets/data/transformed_datasets/{self.dataset_name}_version_{version}_10samples_single_transf_{method}_{self.transf_data}.npy",
-                "rb",
-            ) as f_new:
+            path_ver = Path(
+                self.input_dir, DATA_DIR, "transformed_datasets",
+                f"{self.dataset_name}_version_{version}_10samples_single_transf_{method}_{self.transf_data}.npy",
+            )
+            with open(path_ver, "rb") as f_new:
                 y_ver = np.load(f_new)
                 y_new.append(y_ver)
         self.y_loaded_transformed = np.array(y_new)

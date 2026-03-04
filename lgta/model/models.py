@@ -26,6 +26,11 @@ class EncoderType(str, Enum):
     SIMPLE = "simple"
 
 
+class LatentMode(str, Enum):
+    TEMPORAL = "temporal"
+    GLOBAL = "global"
+
+
 class PositionalEmbedding(nn.Module):
     """Learned positional embedding added to input sequences."""
 
@@ -89,11 +94,10 @@ class TemporalSelfAttention(nn.Module):
 
 
 class Encoder(nn.Module):
-    """BiLSTM encoder with self-attention producing a per-timestep latent code.
+    """BiLSTM encoder with self-attention.
 
-    Concatenates dynamic features with the raw input, processes through BiLSTM
-    and self-attention (no temporal pooling), then projects each timestep
-    independently to (z_mean, z_log_var). Output z has shape (B, W, latent_dim).
+    Produces either a per-timestep latent code (B, W, latent_dim) in TEMPORAL
+    mode, or a global vector (B, latent_dim) in GLOBAL mode via mean-pooling.
     """
 
     def __init__(
@@ -105,9 +109,11 @@ class Encoder(nn.Module):
         num_heads: int = 8,
         ff_dim: int = 256,
         dropout_rate: float = 0.3,
+        latent_mode: LatentMode = LatentMode.TEMPORAL,
     ):
         super().__init__()
         self.n_main_features = n_main_features
+        self.latent_mode = latent_mode
 
         self.lstm = nn.LSTM(
             input_size=n_main_features + n_dyn_features,
@@ -156,15 +162,20 @@ class Encoder(nn.Module):
         z_mean = self.z_mean_layer(enc)
         z_log_var = self.z_log_var_layer(enc)
         z = self.sampling(z_mean, z_log_var)
+
+        if self.latent_mode == LatentMode.GLOBAL:
+            z_mean = z_mean.mean(dim=1)
+            z_log_var = z_log_var.mean(dim=1)
+            z = z.mean(dim=1)
+
         return z_mean, z_log_var, z
 
 
 class SimpleEncoder(nn.Module):
-    """BiLSTM encoder without self-attention producing a per-timestep latent code.
+    """BiLSTM encoder without self-attention.
 
-    Simpler alternative to Encoder that skips self-attention. The BiLSTM still
-    provides cross-timestep context, and each timestep is projected
-    independently to (z_mean, z_log_var). Output z has shape (B, W, latent_dim).
+    Simpler alternative to Encoder that skips self-attention. Produces either
+    a per-timestep (B, W, latent_dim) or global (B, latent_dim) latent code.
     """
 
     def __init__(
@@ -174,9 +185,11 @@ class SimpleEncoder(nn.Module):
         n_dyn_features: int,
         latent_dim: int,
         dropout_rate: float = 0.3,
+        latent_mode: LatentMode = LatentMode.TEMPORAL,
     ):
         super().__init__()
         self.n_main_features = n_main_features
+        self.latent_mode = latent_mode
 
         self.lstm = nn.LSTM(
             input_size=n_main_features + n_dyn_features,
@@ -216,17 +229,22 @@ class SimpleEncoder(nn.Module):
         z_mean = self.z_mean_layer(enc)
         z_log_var = self.z_log_var_layer(enc)
         z = self.sampling(z_mean, z_log_var)
+
+        if self.latent_mode == LatentMode.GLOBAL:
+            z_mean = z_mean.mean(dim=1)
+            z_log_var = z_log_var.mean(dim=1)
+            z = z.mean(dim=1)
+
         return z_mean, z_log_var, z
 
 
 class Decoder(nn.Module):
-    """BiLSTM decoder that reconstructs temporal output from a temporal latent code.
+    """BiLSTM decoder that reconstructs temporal output from a latent code.
 
-    Receives z of shape (B, W, latent_dim) with per-timestep latent values,
-    concatenates with dynamic features, processes through BiLSTM, and applies
-    a dense projection to reconstruct the window. A linear skip connection
-    (z_proj) projects z per-timestep into the LSTM hidden-state space,
-    guaranteeing a direct path from latent perturbations to the output.
+    In TEMPORAL mode, receives z of shape (B, W, latent_dim). In GLOBAL mode,
+    receives z of shape (B, latent_dim) and broadcasts it to (B, W, latent_dim)
+    before processing. A linear skip connection (z_proj) provides a direct path
+    from latent perturbations to the output.
     """
 
     def __init__(
@@ -237,10 +255,12 @@ class Decoder(nn.Module):
         latent_dim: int,
         dropout_rate: float = 0.3,
         spectral_norm: bool = False,
+        latent_mode: LatentMode = LatentMode.TEMPORAL,
     ):
         super().__init__()
         self.window_size = window_size
         self.n_main_features = n_main_features
+        self.latent_mode = latent_mode
 
         self.lstm = nn.LSTM(
             input_size=latent_dim + n_dyn_features,
@@ -266,6 +286,9 @@ class Decoder(nn.Module):
     def forward(
         self, z: torch.Tensor, dyn_inp: torch.Tensor
     ) -> torch.Tensor:
+        if self.latent_mode == LatentMode.GLOBAL and z.dim() == 2:
+            z = z.unsqueeze(1).expand(-1, self.window_size, -1)
+
         dec_inp = torch.cat([z, dyn_inp], dim=-1)
 
         h, _ = self.lstm(dec_inp)
@@ -280,8 +303,8 @@ class Decoder(nn.Module):
 
 
 class CVAE(nn.Module):
-    """Conditional Variational Autoencoder with temporal latent code and
-    optional equivariance regularization for the decoder."""
+    """Conditional Variational Autoencoder with optional temporal latent code
+    and equivariance regularization for the decoder."""
 
     def __init__(
         self,
@@ -291,6 +314,7 @@ class CVAE(nn.Module):
         kl_weight: float = 1.0,
         free_bits: float = 0.0,
         equiv_weight: float = 0.0,
+        latent_mode: LatentMode = LatentMode.TEMPORAL,
     ) -> None:
         super().__init__()
         self.encoder = encoder
@@ -299,6 +323,7 @@ class CVAE(nn.Module):
         self.kl_weight = kl_weight
         self.free_bits = free_bits
         self.equiv_weight = equiv_weight
+        self.latent_mode = latent_mode
 
     def forward(
         self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
@@ -326,6 +351,7 @@ class CVAE(nn.Module):
                 batch_size=z_mean.shape[0],
                 window_size=self.window_size,
                 device=z_mean.device,
+                latent_mode=self.latent_mode,
             )
             equiv_loss = compute_equivariance_loss(
                 self.decoder, z_mean, dynamic_features, perturbation,
@@ -363,6 +389,7 @@ def get_CVAE(
     dropout_rate: float = 0.3,
     encoder_type: EncoderType = EncoderType.FULL,
     spectral_norm: bool = False,
+    latent_mode: LatentMode = LatentMode.TEMPORAL,
 ) -> tuple[Encoder | SimpleEncoder, Decoder]:
     if encoder_type == EncoderType.SIMPLE:
         encoder: Encoder | SimpleEncoder = SimpleEncoder(
@@ -371,6 +398,7 @@ def get_CVAE(
             n_dyn_features=n_dyn_features,
             latent_dim=latent_dim,
             dropout_rate=dropout_rate,
+            latent_mode=latent_mode,
         )
     else:
         num_heads = _valid_num_heads(n_main_features, num_heads)
@@ -382,6 +410,7 @@ def get_CVAE(
             num_heads=num_heads,
             ff_dim=ff_dim,
             dropout_rate=dropout_rate,
+            latent_mode=latent_mode,
         )
     decoder = Decoder(
         window_size=window_size,
@@ -390,5 +419,6 @@ def get_CVAE(
         latent_dim=latent_dim,
         dropout_rate=dropout_rate,
         spectral_norm=spectral_norm,
+        latent_mode=latent_mode,
     )
     return encoder, decoder

@@ -13,6 +13,8 @@ from datasetsforecast.hierarchical import HierarchicalData
 
 from .utils import generate_groups_data_flat, generate_groups_data_matrix
 
+DATA_DIR = "assets/data"
+
 
 class PreprocessDatasets:
     """
@@ -56,8 +58,8 @@ class PreprocessDatasets:
         self._create_directories()
 
     def _create_directories(self) -> None:
-        Path(f"{self.input_dir}data").mkdir(parents=True, exist_ok=True)
-        Path(f"{self.input_dir}assets/data/original_datasets").mkdir(
+        Path(self.input_dir, DATA_DIR).mkdir(parents=True, exist_ok=True)
+        Path(self.input_dir, DATA_DIR, "original_datasets").mkdir(
             parents=True, exist_ok=True
         )
 
@@ -71,7 +73,7 @@ class PreprocessDatasets:
         return method()
 
     def _tourism_small(self) -> dict:
-        data_dir = f"{self.input_dir}data"
+        data_dir = str(Path(self.input_dir) / DATA_DIR)
         Y_df, S_df, tags = HierarchicalData.load(
             directory=data_dir, group="TourismSmall"
         )

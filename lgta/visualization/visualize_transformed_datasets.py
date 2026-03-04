@@ -1,6 +1,10 @@
-from matplotlib import pyplot as plt
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
+
+from lgta.preprocessing.pre_processing_datasets import DATA_DIR
 
 
 class Visualizer:
@@ -31,18 +35,17 @@ class Visualizer:
         self.transf_data = transf_data
 
     def _read_files(self, method):
-        with open(
-            f"{self.input_dir}assets/data/transformed_datasets/{self.dataset}_original.npy",
-            "rb",
-        ) as f:
+        path_orig = Path(self.input_dir, DATA_DIR, "transformed_datasets", f"{self.dataset}_original.npy")
+        with open(path_orig, "rb") as f:
             self.y = np.load(f)
 
         y_new = []
         for version in range(1, self.n_versions + 1):
-            with open(
-                f"{self.input_dir}assets/data/transformed_datasets/{self.dataset}_version_{version}_10samples_{method}_{self.transf_data}.npy",
-                "rb",
-            ) as f_new:
+            path_ver = Path(
+                self.input_dir, DATA_DIR, "transformed_datasets",
+                f"{self.dataset}_version_{version}_10samples_{method}_{self.transf_data}.npy",
+            )
+            with open(path_ver, "rb") as f_new:
                 y_ver = np.load(f_new)
                 y_new.append(y_ver)
         self.y_new = np.array(y_new)
