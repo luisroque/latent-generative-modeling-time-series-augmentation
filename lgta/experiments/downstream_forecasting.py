@@ -2,12 +2,22 @@
 Downstream forecasting experiment. Compares LGTA against all benchmark
 generators by training forecasting models on original-only data vs.
 original + synthetic data from each method.
+
+Can be invoked directly (python lgta/experiments/downstream_forecasting.py)
+or as a module (python -m lgta.experiments.downstream_forecasting) provided
+the repo root is on PYTHONPATH or you run from the repo root.
 """
+
+import sys
+from pathlib import Path
+
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import hashlib
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -16,6 +26,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from lgta.benchmarks import (
     TimeSeriesGenerator,
+    get_benchmark_generators_lgta,
+    get_benchmark_generators_tsdiff,
     get_default_benchmark_generators,
 )
 from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
@@ -406,12 +418,17 @@ def run_downstream_forecasting(
     cfg: ExperimentConfig | None = None,
     method: str | None = None,
     results_only: bool = False,
+    mode: str | None = None,
 ) -> list[ForecastResult]:
     """Run the downstream forecasting comparison.
 
+    mode: 'lgta' uses only benchmarks that do not require TSDiff (TimeGAN, TimeVAE, Direct).
+    mode: 'tsdiff' uses only TSDiff. Use --mode lgta in the lgta env and --mode tsdiff in lgta-tsdiff,
+    then merge results with merge_downstream_results.
+
     If method is set, only that method is run: 'original', 'lgta', or a
     benchmark name (e.g. 'timegan', 'TimeGANGenerator'). Otherwise all
-    methods are run.
+    methods (for the chosen mode) are run.
 
     When results_only is True, no training or inference is run; predictions
     are loaded from cache and results are computed and written. Use this
@@ -439,7 +456,7 @@ def run_downstream_forecasting(
         method_canonical = _resolve_method_arg(method)
 
     if not cfg.benchmark_generators:
-        cfg.benchmark_generators = _default_generators()
+        cfg.benchmark_generators = _default_generators(mode=mode)
 
     print("=" * 70)
     print("DOWNSTREAM FORECASTING EXPERIMENT")
@@ -578,7 +595,11 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
     return all_results
 
 
-def _default_generators() -> list[TimeSeriesGenerator]:
+def _default_generators(mode: str | None = None) -> list[TimeSeriesGenerator]:
+    if mode == "lgta":
+        return get_benchmark_generators_lgta(seed=SEED)
+    if mode == "tsdiff":
+        return get_benchmark_generators_tsdiff(seed=SEED)
     return get_default_benchmark_generators(seed=SEED)
 
 
@@ -631,7 +652,19 @@ if __name__ == "__main__":
         action="store_true",
         help="Do not run training/inference; load cached predictions and write DOWNSTREAM_RESULTS.md for all available methods.",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["lgta", "tsdiff"],
+        default=None,
+        help="lgta: run benchmarks without TSDiff (use in lgta env). tsdiff: run only TSDiff (use in lgta-tsdiff env). If unset, uses default generators for current env.",
+    )
     args = parser.parse_args()
 
     cfg = ExperimentConfig(output_dir=args.output_dir)
-    run_downstream_forecasting(cfg, method=args.method, results_only=args.results_only)
+    run_downstream_forecasting(
+        cfg,
+        method=args.method,
+        results_only=args.results_only,
+        mode=args.mode,
+    )

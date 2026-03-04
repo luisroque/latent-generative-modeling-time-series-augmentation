@@ -15,16 +15,16 @@ Reference table of baseline and comparison methods used in the downstream foreca
 We use the **original implementation** via an adapter. Its dependencies (e.g. `torch~=1.13`, GluonTS) can clash with the main project, so TSDiff is **optional at import time**:
 
 - **Default (main env):** Install only `requirements.txt`. The downstream forecasting experiment runs without TSDiff; other benchmarks (TimeGAN, TimeVAE, etc.) run as usual.
-- **Full benchmarks including TSDiff:** Use a **separate environment** and install benchmark deps there so versions don’t clash:
+- **Full benchmarks including TSDiff:** Use the **lgta-tsdiff** env (minimal deps, no dtaidistance) so versions don’t clash:
 
 ```bash
-conda create -n lgta-benchmarks python=3.10 -y && conda activate lgta-benchmarks
-pip install -r requirements.txt
-pip install -r requirements-benchmarks.txt
+conda create -n lgta-tsdiff python=3.12 -y && conda activate lgta-tsdiff
+pip install -r requirements-tsdiff.txt
+pip install -e .
 python -m lgta.experiments.downstream_forecasting
 ```
 
-`requirements-benchmarks.txt` installs [unconditional-time-series-diffusion](https://github.com/amazon-science/unconditional-time-series-diffusion); the experiment’s default generator list includes TSDiff only when that package is available.
+`requirements-tsdiff.txt` installs [unconditional-time-series-diffusion](https://github.com/amazon-science/unconditional-time-series-diffusion) and the rest of the minimal deps needed for the experiment; the default generator list includes TSDiff only when that package is available.
 
 ## References
 

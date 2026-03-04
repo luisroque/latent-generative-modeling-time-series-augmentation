@@ -4,7 +4,8 @@ from ..preprocessing.pre_processing_datasets import DATA_DIR, PreprocessDatasets
 from lgta.transformations.manipulate_data import ManipulateData
 import numpy as np
 from lgta.visualization.visualize_transformed_datasets import Visualizer
-from .compute_similarities_summary_metrics import ComputeSimilaritiesSummaryMetrics
+
+
 class CreateTransformedVersions:
     """
     A class used to create new datasets from an original one using time series augmentation techniques
@@ -152,6 +153,8 @@ class CreateTransformedVersions:
         self.visualizer.visualize_avg_distance_by_version(dict_transf_ver, title)
 
     def compute_distances_transformed_datasets(self):
+        from .compute_similarities_summary_metrics import ComputeSimilaritiesSummaryMetrics
+
         res_dict = {}
         for i in range(len(self.transformations_w_random)):
             res_dict[self.transformations_w_random[i]] = {}
@@ -169,6 +172,8 @@ class CreateTransformedVersions:
         self._plot_distances(res_dict, title)
 
     def compute_distances_transf_vs_original_by_transf_and_ver(self):
+        from .compute_similarities_summary_metrics import ComputeSimilaritiesSummaryMetrics
+
         res_dict = {}
         for i in range(len(self.transformations)):
             res_dict[self.transformations[i]] = {}
@@ -190,6 +195,8 @@ class CreateTransformedVersions:
         self._plot_distances(res_dict, title)
 
     def _compute_distances_transf_vs_original(self, n_versions, y_new_all):
+        from .compute_similarities_summary_metrics import ComputeSimilaritiesSummaryMetrics
+
         res_dict = {}
         for j in range(n_versions):
             compute_similarities = ComputeSimilaritiesSummaryMetrics(

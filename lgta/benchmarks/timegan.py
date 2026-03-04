@@ -110,7 +110,7 @@ class TimeGANGenerator(TimeSeriesGenerator):
         self,
         hidden_dim: int = 24,
         n_layers: int = 3,
-        iterations: int = 10000,
+        iterations: int = 2000,
         batch_size: int = 128,
         lr: float = 1e-3,
         gamma: float = 1.0,
@@ -170,6 +170,7 @@ class TimeGANGenerator(TimeSeriesGenerator):
             list(self._emb.parameters()) + list(self._rec.parameters()), lr=self.lr
         )
         n = X.size(0)
+        log_every = max(1, self.iterations // 10)
         for itt in range(self.iterations):
             idx = torch.randperm(n, device=self.device)[: self.batch_size]
             batch = X[idx]
@@ -180,6 +181,8 @@ class TimeGANGenerator(TimeSeriesGenerator):
             opt.zero_grad()
             e_loss0.backward()
             opt.step()
+            if itt % log_every == 0 or itt == self.iterations - 1:
+                print(f"  [TimeGAN phase 1/3 embedder] iter {itt+1}/{self.iterations}  E_loss0={e_loss0.item():.4f}")
 
     def _train_supervisor_only(
         self, X: torch.Tensor, ori_time: list[int], max_seq_len: int, z_dim: int
@@ -187,6 +190,7 @@ class TimeGANGenerator(TimeSeriesGenerator):
         """Phase 2: G_loss_S = MSE(H[:,1:,:], supervisor(H[:,:-1,:])) on real H. Original trains only supervisor (G in var_list but no gradient from G_loss_S)."""
         opt_sup = torch.optim.Adam(self._sup.parameters(), lr=self.lr)
         n = X.size(0)
+        log_every = max(1, self.iterations // 10)
         for itt in range(self.iterations):
             idx = torch.randperm(n, device=self.device)[: self.batch_size]
             batch = X[idx]
@@ -197,6 +201,8 @@ class TimeGANGenerator(TimeSeriesGenerator):
             opt_sup.zero_grad()
             g_loss_s.backward()
             opt_sup.step()
+            if itt % log_every == 0 or itt == self.iterations - 1:
+                print(f"  [TimeGAN phase 2/3 supervisor] iter {itt+1}/{self.iterations}  G_loss_S={g_loss_s.item():.4f}")
 
     def _train_joint(
         self, X: torch.Tensor, ori_time: list[int], max_seq_len: int, z_dim: int, no: int
@@ -210,6 +216,7 @@ class TimeGANGenerator(TimeSeriesGenerator):
             list(self._emb.parameters()) + list(self._rec.parameters()), lr=self.lr
         )
         n = X.size(0)
+        log_every = max(1, self.iterations // 10)
 
         for itt in range(self.iterations):
             step_d_loss = torch.tensor(0.0, device=self.device)
@@ -312,6 +319,14 @@ class TimeGANGenerator(TimeSeriesGenerator):
                 d_loss.backward()
                 opt_d.step()
                 step_d_loss = d_loss.detach()
+
+            if itt % log_every == 0 or itt == self.iterations - 1:
+                print(
+                    f"  [TimeGAN phase 3/3 joint] iter {itt+1}/{self.iterations}  "
+                    f"D={step_d_loss.item():.4f}  G_U={step_g_loss_u.item():.4f}  "
+                    f"G_S={step_g_loss_s.item():.4f}  G_V={step_g_loss_v.item():.4f}  "
+                    f"E_T0={step_e_loss_t0.item():.4f}"
+                )
 
     @torch.no_grad()
     def _generate(self) -> np.ndarray:
