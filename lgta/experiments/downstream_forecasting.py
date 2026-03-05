@@ -26,14 +26,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from lgta.benchmarks import (
     TimeSeriesGenerator,
-    get_benchmark_generators_lgta,
-    get_benchmark_generators_tsdiff,
     get_default_benchmark_generators,
 )
-from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
-from lgta.model.generate_data import generate_synthetic_data
-from lgta.model.models import LatentMode
-from lgta.preprocessing.pre_processing_datasets import PreprocessDatasets
 
 
 SEED = 42
@@ -360,6 +354,8 @@ def _load_synthetic(method_dir: Path) -> np.ndarray:
 
 def _load_original_data(cfg: ExperimentConfig) -> np.ndarray:
     """Load the (n_timesteps, n_series) data matrix without training LGTA."""
+    from lgta.preprocessing.pre_processing_datasets import PreprocessDatasets
+
     ppc = PreprocessDatasets(dataset=cfg.dataset_name, freq=cfg.freq)
     data = ppc.apply_preprocess()
     return data["predict"]["data_matrix"].astype(np.float32)
@@ -370,6 +366,10 @@ def _generate_lgta(cfg: ExperimentConfig) -> tuple[np.ndarray, np.ndarray]:
 
     Returns (X_orig, X_lgta) both of shape (n_timesteps, n_series).
     """
+    from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
+    from lgta.model.generate_data import generate_synthetic_data
+    from lgta.model.models import LatentMode
+
     creator = CreateTransformedVersionsCVAE(
         dataset_name=cfg.dataset_name, freq=cfg.freq,
     )
@@ -395,7 +395,6 @@ _BENCHMARK_NAME_ALIASES: dict[str, str] = {
     "timegan": "TimeGANGenerator",
     "timevae": "TimeVAEGenerator",
     "direct": "DirectTransformGenerator",
-    "tsdiff": "TSDiffGenerator",
 }
 
 
@@ -418,27 +417,19 @@ def run_downstream_forecasting(
     cfg: ExperimentConfig | None = None,
     method: str | None = None,
     results_only: bool = False,
-    mode: str | None = None,
 ) -> list[ForecastResult]:
     """Run the downstream forecasting comparison.
 
-    mode: 'lgta' uses only benchmarks that do not require TSDiff (TimeGAN, TimeVAE, Direct).
-    mode: 'tsdiff' uses only TSDiff. Use --mode lgta in the lgta env and --mode tsdiff in lgta-tsdiff,
-    then merge results with merge_downstream_results.
-
     If method is set, only that method is run: 'original', 'lgta', or a
     benchmark name (e.g. 'timegan', 'TimeGANGenerator'). Otherwise all
-    methods (for the chosen mode) are run.
+    methods are run.
 
     When results_only is True, no training or inference is run; predictions
-    are loaded from cache and results are computed and written. Use this
-    after running methods separately to aggregate all cached runs into
-    DOWNSTREAM_RESULTS.md.
+    are loaded from cache and results are computed and written.
 
     Cache: under assets/cache/downstream_forecasting/<config_id>/ we store
     shared test data and per-method predictions (and optionally synthetic).
-    output_dir only controls where DOWNSTREAM_RESULTS.md is written. If predictions
-    exist for a method, training/inference for that method is skipped.
+    output_dir only controls where DOWNSTREAM_RESULTS.md is written.
     """
     if cfg is None:
         cfg = ExperimentConfig()
@@ -456,7 +447,7 @@ def run_downstream_forecasting(
         method_canonical = _resolve_method_arg(method)
 
     if not cfg.benchmark_generators:
-        cfg.benchmark_generators = _default_generators(mode=mode)
+        cfg.benchmark_generators = get_default_benchmark_generators(seed=SEED)
 
     print("=" * 70)
     print("DOWNSTREAM FORECASTING EXPERIMENT")
@@ -464,11 +455,7 @@ def run_downstream_forecasting(
         print(f"  (single method: {method_canonical})")
     print("=" * 70)
 
-    if single and method_canonical == "original":
-        print("\n[1/4] Loading data ...")
-        X_orig = _load_original_data(cfg)
-        X_lgta = None
-    elif single and method_canonical not in ("original", "lgta"):
+    if single and method_canonical not in ("original", "lgta"):
         print("\n[1/4] Loading data ...")
         X_orig = _load_original_data(cfg)
         X_lgta = None
@@ -530,7 +517,7 @@ def run_downstream_forecasting(
         if not benchmarks_to_run:
             raise ValueError(
                 f"Unknown or unavailable method: {method}. "
-                f"Choose from: original, lgta, timegan, timevae, direct, tsdiff (if installed)."
+                f"Choose from: original, lgta, timegan, timevae, direct."
             )
 
     if benchmarks_to_run:
@@ -595,14 +582,6 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
     return all_results
 
 
-def _default_generators(mode: str | None = None) -> list[TimeSeriesGenerator]:
-    if mode == "lgta":
-        return get_benchmark_generators_lgta(seed=SEED)
-    if mode == "tsdiff":
-        return get_benchmark_generators_tsdiff(seed=SEED)
-    return get_default_benchmark_generators(seed=SEED)
-
-
 def _print_results(results: list[ForecastResult]) -> None:
     print("\n" + "=" * 70)
     print("RESULTS")
@@ -639,7 +618,7 @@ if __name__ == "__main__":
         "--method",
         type=str,
         default=None,
-        help="Run only this method: original, lgta, timegan, timevae, direct, tsdiff (or class name e.g. TimeGANGenerator).",
+        help="Run only this method: original, lgta, timegan, timevae, direct (or class name e.g. TimeGANGenerator).",
     )
     parser.add_argument(
         "--output-dir",
@@ -652,13 +631,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Do not run training/inference; load cached predictions and write DOWNSTREAM_RESULTS.md for all available methods.",
     )
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["lgta", "tsdiff"],
-        default=None,
-        help="lgta: run benchmarks without TSDiff (use in lgta env). tsdiff: run only TSDiff (use in lgta-tsdiff env). If unset, uses default generators for current env.",
-    )
     args = parser.parse_args()
 
     cfg = ExperimentConfig(output_dir=args.output_dir)
@@ -666,5 +638,4 @@ if __name__ == "__main__":
         cfg,
         method=args.method,
         results_only=args.results_only,
-        mode=args.mode,
     )

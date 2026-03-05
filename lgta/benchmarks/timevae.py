@@ -62,6 +62,8 @@ class TimeVAEGenerator(TimeSeriesGenerator):
         self.kl_weight = kl_weight
 
     def _fit(self, data: np.ndarray) -> None:
+        torch.manual_seed(self.seed)
+        np.random.seed(self.seed)
         T, D = data.shape
         sequences = torch.from_numpy(
             data.T.reshape(D, T, 1).astype(np.float32)
@@ -72,6 +74,7 @@ class TimeVAEGenerator(TimeSeriesGenerator):
         opt = torch.optim.Adam(
             list(self._enc.parameters()) + list(self._dec.parameters()), lr=self.lr
         )
+        log_every = max(1, self.epochs // 10)
 
         for epoch in range(self.epochs):
             idx = torch.randperm(D)[: self.batch_size]
@@ -87,6 +90,12 @@ class TimeVAEGenerator(TimeSeriesGenerator):
             opt.zero_grad()
             loss.backward()
             opt.step()
+            if epoch % log_every == 0 or epoch == self.epochs - 1:
+                print(
+                    f"  [TimeVAE] epoch {epoch+1}/{self.epochs}  "
+                    f"recon={recon_loss.item():.4f}  KL={kl_loss.item():.4f}  "
+                    f"loss={loss.item():.4f}"
+                )
 
     @torch.no_grad()
     def _generate(self) -> np.ndarray:
