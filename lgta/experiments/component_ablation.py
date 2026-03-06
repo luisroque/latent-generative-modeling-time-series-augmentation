@@ -24,7 +24,6 @@ from lgta.transformations.manipulate_data import ManipulateData
 DEFAULT_ABLATION_DATASETS: list[tuple[str, str]] = [
     ("tourism_small", "Q"),
     ("tourism", "Q"),
-    ("traffic", "D"),
     ("wiki2", "D"),
     ("labour", "M"),
     ("m3", "Q"),
@@ -700,7 +699,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="Dataset name (e.g. tourism_small, traffic, wiki2, labour, tourism, m3). Default: tourism_small.",
+        help="Dataset name (e.g. tourism_small, tourism, wiki2, labour, m3). Default: tourism_small.",
     )
     parser.add_argument(
         "--freq",

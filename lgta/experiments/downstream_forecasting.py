@@ -34,7 +34,6 @@ SEED = 42
 DEFAULT_DATASET_CONFIGS: list[tuple[str, str]] = [
     ("tourism_small", "Q"),
     ("tourism", "Q"),
-    ("traffic", "D"),
     ("wiki2", "D"),
     ("labour", "M"),
     ("m3", "Q"),
@@ -43,12 +42,12 @@ DEFAULT_DATASET_CONFIGS: list[tuple[str, str]] = [
 
 @dataclass
 class ForecastResult:
-    """Stores MSE statistics for one augmentation method + one forecaster."""
+    """Stores MASE statistics for one augmentation method + one forecaster."""
 
     method: str
     forecaster: str
-    mse_median: float
-    mse_std: float
+    mase_mean: float
+    mase_std: float
 
 
 @dataclass
@@ -137,12 +136,22 @@ def _prepare_windows(
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 
+def _mase_scale(X_train: np.ndarray, y_train: np.ndarray) -> float:
+    """In-sample MAE of naive (persistence) forecast. Used as MASE denominator."""
+    n_out = y_train.shape[1]
+    naive = X_train[:, -1, :n_out].astype(np.float64)
+    y = y_train.astype(np.float64)
+    scale = float(np.mean(np.abs(y - naive)))
+    return scale if scale > 0 else 1.0
+
+
 def _train_and_evaluate(
     model: nn.Module,
     X_train: np.ndarray,
     y_train: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
+    scale: float,
     epochs: int,
     batch_size: int,
     device: torch.device,
@@ -165,8 +174,10 @@ def _train_and_evaluate(
     model.eval()
     with torch.no_grad():
         preds = model(torch.from_numpy(X_test).to(device)).cpu().numpy()
-    mse = float(np.mean((y_test - preds) ** 2))
-    return mse, preds.astype(np.float32)
+        fitted = model(torch.from_numpy(X_train).to(device)).cpu().numpy()
+    mae = float(np.mean(np.abs(y_test.astype(np.float64) - preds.astype(np.float64))))
+    mase = mae / scale
+    return mase, preds.astype(np.float32), fitted.astype(np.float32)
 
 
 def _run_single(
@@ -178,6 +189,7 @@ def _run_single(
     y_train: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
+    scale: float,
     cfg: ExperimentConfig,
 ) -> tuple[float, np.ndarray]:
     device = _get_device()
@@ -185,17 +197,18 @@ def _run_single(
         model = _LSTM(n_features_in, n_features_out).to(device)
     else:
         model = _Linear(n_features_in, window_size, n_features_out).to(device)
-    mse, preds = _train_and_evaluate(
+    mase, preds, fitted = _train_and_evaluate(
         model,
         X_train,
         y_train,
         X_test,
         y_test,
+        scale,
         cfg.forecast_epochs,
         cfg.forecast_batch_size,
         device,
     )
-    return mse, preds
+    return mase, preds, fitted
 
 
 def _evaluate_method(
@@ -205,18 +218,31 @@ def _evaluate_method(
     window_size: int,
     X_test_windows: np.ndarray,
     y_test: np.ndarray,
+    scale: float,
     cfg: ExperimentConfig,
-) -> tuple[list[ForecastResult], np.ndarray, np.ndarray]:
-    """Returns (results, predictions_LSTM, predictions_Linear).
+    y_train_mean: np.ndarray | None = None,
+    y_train_std: np.ndarray | None = None,
+) -> tuple[list[ForecastResult], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Returns (results, predictions_LSTM, predictions_Linear, fitted_LSTM, fitted_Linear).
 
     predictions_* have shape (n_runs, n_test, n_orig_features).
+    fitted_* have shape (n_runs, n_train, n_orig_features).
+    If y_train_mean and y_train_std are provided, targets are scaled before training
+    and predictions/fitted are unscaled before return (so outputs stay in original scale).
     """
     X_win, y_win = _prepare_windows(X_data, window_size)
     n_test = X_test_windows.shape[0]
     n_total = X_win.shape[0]
     n_train = n_total - n_test
 
-    X_train, y_train = X_win[:n_train], y_win[:n_train, :n_orig_features]
+    X_train, y_train = X_win[:n_train], y_win[:n_train, :n_orig_features].astype(
+        np.float64
+    )
+    y_test_f = y_test.astype(np.float64)
+    use_scale = y_train_mean is not None and y_train_std is not None
+    if use_scale:
+        y_train = (y_train - y_train_mean) / y_train_std
+        y_test_f = (y_test_f - y_train_mean) / y_train_std
 
     if X_data.shape[1] > n_orig_features:
         X_test_aug = np.zeros(
@@ -231,41 +257,102 @@ def _evaluate_method(
             ]
         X_test_eval = X_test_aug
     else:
-        X_test_eval = X_test_windows
+        X_test_eval = np.asarray(X_test_windows, dtype=np.float32).copy()
 
+    if use_scale:
+        # Scale original channels (0 .. n_orig_features-1) with per-series stats.
+        X_train = X_train.astype(np.float64)
+        X_train[:, :, :n_orig_features] = (
+            X_train[:, :, :n_orig_features] - y_train_mean
+        ) / y_train_std
+
+        X_test_eval = X_test_eval.astype(np.float64)
+        X_test_eval[:, :, :n_orig_features] = (
+            X_test_eval[:, :, :n_orig_features] - y_train_mean
+        ) / y_train_std
+
+        # Scale synthetic channels (n_orig_features .. end) with their own per-series stats.
+        if X_data.shape[1] > n_orig_features:
+            syn_start = n_orig_features
+            syn_end = X_data.shape[1]
+            syn_slice = slice(syn_start, syn_end)
+
+            syn_train = X_train[:, :, syn_slice]
+            syn_mean = np.mean(syn_train, axis=(0, 1), dtype=np.float64)
+            syn_std = np.std(syn_train, axis=(0, 1), dtype=np.float64)
+            syn_std = np.maximum(syn_std, 1e-8)
+
+            X_train[:, :, syn_slice] = (syn_train - syn_mean) / syn_std
+
+            syn_test = X_test_eval[:, :, syn_slice]
+            X_test_eval[:, :, syn_slice] = (syn_test - syn_mean) / syn_std
+
+        X_train = X_train.astype(np.float32)
+        X_test_eval = X_test_eval.astype(np.float32)
+
+    y_test_for_train = y_test_f.astype(np.float32)
     results: list[ForecastResult] = []
     preds_lstm_list: list[np.ndarray] = []
     preds_linear_list: list[np.ndarray] = []
+    fitted_lstm_list: list[np.ndarray] = []
+    fitted_linear_list: list[np.ndarray] = []
     for forecaster_name in ("LSTM", "Linear"):
-        mse_runs: list[float] = []
+        mase_runs: list[float] = []
         for _ in range(cfg.n_runs):
-            mse, preds = _run_single(
+            mase, preds, fitted = _run_single(
                 forecaster_name,
                 X_data.shape[1],
                 n_orig_features,
                 window_size,
                 X_train,
-                y_train,
+                y_train.astype(np.float32),
                 X_test_eval,
-                y_test,
+                y_test_for_train,
+                scale,
                 cfg,
             )
-            mse_runs.append(mse)
+            mase_runs.append(mase)
             if forecaster_name == "LSTM":
                 preds_lstm_list.append(preds)
+                fitted_lstm_list.append(fitted)
             else:
                 preds_linear_list.append(preds)
-        results.append(
-            ForecastResult(
-                method=method_name,
-                forecaster=forecaster_name,
-                mse_median=float(np.median(mse_runs)),
-                mse_std=float(np.std(mse_runs)),
+                fitted_linear_list.append(fitted)
+        if not use_scale:
+            results.append(
+                ForecastResult(
+                    method=method_name,
+                    forecaster=forecaster_name,
+                    mase_mean=float(np.mean(mase_runs)),
+                    mase_std=float(np.std(mase_runs)),
+                )
             )
-        )
     preds_LSTM = np.stack(preds_lstm_list, axis=0)
     preds_Linear = np.stack(preds_linear_list, axis=0)
-    return results, preds_LSTM, preds_Linear
+    fitted_LSTM = np.stack(fitted_lstm_list, axis=0)
+    fitted_Linear = np.stack(fitted_linear_list, axis=0)
+    if use_scale:
+        preds_LSTM = preds_LSTM * y_train_std + y_train_mean
+        preds_Linear = preds_Linear * y_train_std + y_train_mean
+        fitted_LSTM = fitted_LSTM * y_train_std + y_train_mean
+        fitted_Linear = fitted_Linear * y_train_std + y_train_mean
+        mase_lstm = np.mean(np.abs(y_test - preds_LSTM), axis=(1, 2)) / scale
+        mase_linear = np.mean(np.abs(y_test - preds_Linear), axis=(1, 2)) / scale
+        results = [
+            ForecastResult(
+                method=method_name,
+                forecaster="LSTM",
+                mase_mean=float(np.mean(mase_lstm)),
+                mase_std=float(np.std(mase_lstm)),
+            ),
+            ForecastResult(
+                method=method_name,
+                forecaster="Linear",
+                mase_mean=float(np.mean(mase_linear)),
+                mase_std=float(np.std(mase_linear)),
+            ),
+        ]
+    return results, preds_LSTM, preds_Linear, fitted_LSTM, fitted_Linear
 
 
 # ---------------------------------------------------------------------------
@@ -329,22 +416,59 @@ def _save_shared_test_data(
     y_test: np.ndarray,
     X_test_windows: np.ndarray,
     n_orig_features: int,
+    scale: float,
+    window_size: int,
 ) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     np.save(cache_dir / "X_orig.npy", X_orig)
     np.save(cache_dir / "y_test.npy", y_test)
     np.save(cache_dir / "X_test_windows.npy", X_test_windows)
+    np.save(cache_dir / "scale.npy", np.array(scale, dtype=np.float64))
     (cache_dir / "n_orig_features.txt").write_text(str(n_orig_features))
+    (cache_dir / "window_size.txt").write_text(str(window_size))
+    _, y_win = _prepare_windows(X_orig, window_size)
+    n_test = X_test_windows.shape[0]
+    y_train = y_win[: y_win.shape[0] - n_test, :n_orig_features]
+    y_train_mean = np.mean(y_train, axis=0).astype(np.float64)
+    y_train_std = np.std(y_train, axis=0).astype(np.float64)
+    y_train_std = np.maximum(y_train_std, 1e-8)
+    np.save(cache_dir / "y_train_mean.npy", y_train_mean)
+    np.save(cache_dir / "y_train_std.npy", y_train_std)
 
 
 def _load_shared_test_data(
     cache_dir: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    window_size: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, float, np.ndarray | None, np.ndarray | None]:
     X_orig = np.load(cache_dir / "X_orig.npy")
     y_test = np.load(cache_dir / "y_test.npy")
     X_test_windows = np.load(cache_dir / "X_test_windows.npy")
     n_orig_features = int((cache_dir / "n_orig_features.txt").read_text())
-    return X_orig, y_test, X_test_windows, n_orig_features
+    scale_path = cache_dir / "scale.npy"
+    if scale_path.exists():
+        scale = float(np.load(scale_path))
+    else:
+        w = int((cache_dir / "window_size.txt").read_text()) if (cache_dir / "window_size.txt").exists() else (window_size or 10)
+        X_win, y_win = _prepare_windows(X_orig, w)
+        n_test = X_test_windows.shape[0]
+        n_train = X_win.shape[0] - n_test
+        scale = _mase_scale(X_win[:n_train], y_win[:n_train, :n_orig_features])
+    mean_path = cache_dir / "y_train_mean.npy"
+    std_path = cache_dir / "y_train_std.npy"
+    if mean_path.exists() and std_path.exists():
+        y_train_mean = np.load(mean_path)
+        y_train_std = np.load(std_path)
+    else:
+        w = int((cache_dir / "window_size.txt").read_text()) if (cache_dir / "window_size.txt").exists() else (window_size or 10)
+        _, y_win = _prepare_windows(X_orig, w)
+        n_test = X_test_windows.shape[0]
+        y_train = y_win[: y_win.shape[0] - n_test, :n_orig_features]
+        y_train_mean = np.mean(y_train, axis=0).astype(np.float64)
+        y_train_std = np.std(y_train, axis=0).astype(np.float64)
+        y_train_std = np.maximum(y_train_std, 1e-8)
+        np.save(mean_path, y_train_mean)
+        np.save(std_path, y_train_std)
+    return X_orig, y_test, X_test_windows, n_orig_features, scale, y_train_mean, y_train_std
 
 
 def _has_shared_test_data(cache_dir: Path) -> bool:
@@ -357,10 +481,16 @@ def _save_predictions(
     method_dir: Path,
     preds_LSTM: np.ndarray,
     preds_Linear: np.ndarray,
+    fitted_LSTM: np.ndarray | None = None,
+    fitted_Linear: np.ndarray | None = None,
 ) -> None:
     method_dir.mkdir(parents=True, exist_ok=True)
     np.save(method_dir / "predictions_LSTM.npy", preds_LSTM)
     np.save(method_dir / "predictions_Linear.npy", preds_Linear)
+    if fitted_LSTM is not None:
+        np.save(method_dir / "fitted_LSTM.npy", fitted_LSTM)
+    if fitted_Linear is not None:
+        np.save(method_dir / "fitted_Linear.npy", fitted_Linear)
 
 
 def _has_predictions(method_dir: Path) -> bool:
@@ -375,27 +505,45 @@ def _load_predictions(method_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return preds_LSTM, preds_Linear
 
 
+def _load_fitted(
+    method_dir: Path,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Load fitted (in-sample) predictions if present. Backward compatible when missing."""
+    fitted_lstm_path = method_dir / "fitted_LSTM.npy"
+    fitted_linear_path = method_dir / "fitted_Linear.npy"
+    fitted_LSTM = (
+        np.load(fitted_lstm_path) if fitted_lstm_path.exists() else None
+    )
+    fitted_Linear = (
+        np.load(fitted_linear_path) if fitted_linear_path.exists() else None
+    )
+    return fitted_LSTM, fitted_Linear
+
+
 def _results_from_predictions(
     method_name: str,
     y_test: np.ndarray,
     preds_LSTM: np.ndarray,
     preds_Linear: np.ndarray,
+    scale: float,
 ) -> list[ForecastResult]:
     """Compute ForecastResults from saved predictions (n_runs, n_test, n_out)."""
-    mse_lstm = np.mean((y_test - preds_LSTM) ** 2, axis=(1, 2))
-    mse_linear = np.mean((y_test - preds_Linear) ** 2, axis=(1, 2))
+    mae_lstm = np.mean(np.abs(y_test - preds_LSTM), axis=(1, 2))
+    mae_linear = np.mean(np.abs(y_test - preds_Linear), axis=(1, 2))
+    mase_lstm = mae_lstm / scale
+    mase_linear = mae_linear / scale
     return [
         ForecastResult(
             method=method_name,
             forecaster="LSTM",
-            mse_median=float(np.median(mse_lstm)),
-            mse_std=float(np.std(mse_lstm)),
+            mase_mean=float(np.mean(mase_lstm)),
+            mase_std=float(np.std(mase_lstm)),
         ),
         ForecastResult(
             method=method_name,
             forecaster="Linear",
-            mse_median=float(np.median(mse_linear)),
-            mse_std=float(np.std(mse_linear)),
+            mase_mean=float(np.mean(mase_linear)),
+            mase_std=float(np.std(mase_linear)),
         ),
     ]
 
@@ -435,7 +583,7 @@ def _plot_original_vs_generated(
     methods = _methods_with_synthetic(cache_dir, cfg)
     if not methods:
         return
-    X_orig, _, _, _ = _load_shared_test_data(cache_dir)
+    X_orig, _, _, _, _, _, _ = _load_shared_test_data(cache_dir, cfg.window_size)
     n_timesteps, n_total_series = X_orig.shape
     n_plot = min(n_series, n_total_series)
     rng = np.random.RandomState(seed)
@@ -487,6 +635,130 @@ def _plot_original_vs_generated(
     plt.savefig(out_file, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Plot saved to {out_file}")
+
+
+def _plot_predictions_by_method_forecaster(
+    cache_dir: Path,
+    output_dir: Path,
+    cfg: ExperimentConfig,
+    n_series: int = 3,
+    seed: int = SEED,
+) -> None:
+    """Plot actual, fitted (train), and predictions (test): rows = method, columns = LSTM / Linear.
+
+    Targets and predictions are in the same units (no scaling/unscaling in this pipeline).
+    """
+    method_names = [
+        name
+        for name in _known_cache_method_names()
+        if _has_predictions(_method_dir_for(cache_dir, name, cfg))
+    ]
+    if not method_names:
+        return
+    X_orig, y_test, _, n_orig_features, _, _, _ = _load_shared_test_data(
+        cache_dir, cfg.window_size
+    )
+    _, y_win = _prepare_windows(X_orig, cfg.window_size)
+    n_test = y_test.shape[0]
+    n_train = y_win.shape[0] - n_test
+    y_train = y_win[:n_train]
+
+    n_series_avail = min(n_series, n_orig_features)
+    rng = np.random.RandomState(seed)
+    series_indices: np.ndarray = rng.choice(
+        n_orig_features, size=n_series_avail, replace=False
+    )
+
+    predictions: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    fitted: dict[str, tuple[np.ndarray | None, np.ndarray | None]] = {}
+    for name in method_names:
+        method_d = _method_dir_for(cache_dir, name, cfg)
+        predictions[name] = _load_predictions(method_d)
+        fitted[name] = _load_fitted(method_d)
+
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    n_rows = len(method_names)
+    n_cols = 2
+    t_full = np.arange(n_train + n_test)
+
+    for plot_idx, series_idx in enumerate(series_indices):
+        actual_full_s = np.concatenate(
+            [y_train[:, series_idx], y_test[:, series_idx]], axis=0
+        )
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(4 * n_cols, 2.2 * n_rows),
+            sharex=True,
+            squeeze=False,
+        )
+        for row, method_name in enumerate(method_names):
+            pred_lstm, pred_linear = predictions[method_name]
+            f_lstm, f_linear = fitted[method_name]
+            lstm_pred_mean = pred_lstm.mean(axis=0)[:, series_idx]
+            linear_pred_mean = pred_linear.mean(axis=0)[:, series_idx]
+            ax_lstm = axes[row, 0]
+            ax_linear = axes[row, 1]
+            ax_lstm.plot(
+                t_full, actual_full_s, label="Actual", color="C0", alpha=0.9
+            )
+            if f_lstm is not None:
+                lstm_fit_mean = f_lstm.mean(axis=0)[:n_train, series_idx]
+                ax_lstm.plot(
+                    np.arange(n_train),
+                    lstm_fit_mean,
+                    label="Fitted (train)",
+                    color="C1",
+                    alpha=0.9,
+                    linestyle="--",
+                )
+            ax_lstm.plot(
+                np.arange(n_train, n_train + n_test),
+                lstm_pred_mean,
+                label="Pred (test)",
+                color="C2",
+                alpha=0.9,
+                linestyle="-.",
+            )
+            ax_linear.plot(
+                t_full, actual_full_s, label="Actual", color="C0", alpha=0.9
+            )
+            if f_linear is not None:
+                linear_fit_mean = f_linear.mean(axis=0)[:n_train, series_idx]
+                ax_linear.plot(
+                    np.arange(n_train),
+                    linear_fit_mean,
+                    label="Fitted (train)",
+                    color="C1",
+                    alpha=0.9,
+                    linestyle="--",
+                )
+            ax_linear.plot(
+                np.arange(n_train, n_train + n_test),
+                linear_pred_mean,
+                label="Pred (test)",
+                color="C2",
+                alpha=0.9,
+                linestyle="-.",
+            )
+            if row == 0:
+                ax_lstm.set_title("LSTM")
+                ax_linear.set_title("Linear")
+            ax_lstm.set_ylabel(method_name, fontsize=9)
+            ax_lstm.legend(loc="upper right", fontsize=7)
+            ax_linear.legend(loc="upper right", fontsize=7)
+        axes[-1, 0].set_xlabel("Time step")
+        axes[-1, 1].set_xlabel("Time step")
+        plt.suptitle(
+            f"Actual, fitted & predictions — series {series_idx} ({cfg.dataset_name})",
+            y=1.01,
+        )
+        plt.tight_layout()
+        out_file = plots_dir / f"predictions_by_method_series_{plot_idx}.png"
+        plt.savefig(out_file, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Plot saved to {out_file}")
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +870,7 @@ def run_downstream_forecasting(
 
     Cache: per-dataset folder assets/cache/downstream_forecasting/<dataset_name>/
     containing shared test data, model_weights/, and per-method subdirs.
-    Results (DOWNSTREAM_RESULTS.md and plots/) are written to
+    Results (DOWNSTREAM_RESULTS.md, DOWNSTREAM_RESULTS_LSTM.md, DOWNSTREAM_RESULTS_Linear.md, and plots/) are written to
     output_dir / <lgta_config_slug>, so each dataset and LGTA configuration gets its own folder.
     """
     if cfg is None:
@@ -641,7 +913,12 @@ def run_downstream_forecasting(
     y_test = y_orig_win[n_train:]
 
     if not _has_shared_test_data(cache):
-        _save_shared_test_data(cache, X_orig, y_test, X_test_windows, n_orig_features)
+        scale = _mase_scale(X_orig_win[:n_train], y_orig_win[:n_train, :n_orig_features])
+        _save_shared_test_data(
+            cache, X_orig, y_test, X_test_windows, n_orig_features, scale, cfg.window_size
+        )
+    else:
+        _, _, _, _, scale, _, _ = _load_shared_test_data(cache, cfg.window_size)
 
     all_results: list[ForecastResult] = []
 
@@ -650,47 +927,65 @@ def run_downstream_forecasting(
         orig_dir = _method_dir(cache, "Original")
         if _has_predictions(orig_dir):
             print("\n[2/4] Original: loading from cache ...")
-            _, y_test, _, _ = _load_shared_test_data(cache)
+            _, y_test, _, _, scale, _, _ = _load_shared_test_data(
+                cache, cfg.window_size
+            )
             p_lstm, p_lin = _load_predictions(orig_dir)
             all_results.extend(
-                _results_from_predictions("Original", y_test, p_lstm, p_lin)
+                _results_from_predictions("Original", y_test, p_lstm, p_lin, scale)
             )
         else:
             print("\n[2/4] Evaluating Original (no augmentation) ...")
-            results, p_lstm, p_lin = _evaluate_method(
+            _, _, _, _, scale, y_mean, y_std = _load_shared_test_data(
+                cache, cfg.window_size
+            )
+            results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 "Original",
                 X_orig,
                 n_orig_features,
                 cfg.window_size,
                 X_test_windows,
                 y_test,
+                scale,
                 cfg,
+                y_mean,
+                y_std,
             )
             all_results.extend(results)
-            _save_predictions(orig_dir, p_lstm, p_lin)
+            _save_predictions(orig_dir, p_lstm, p_lin, f_lstm, f_lin)
 
     run_lgta = (not single or method_canonical == "lgta") and X_lgta is not None
     if run_lgta:
         lgta_dir = _lgta_method_dir(cache, cfg)
         if _has_predictions(lgta_dir):
             print("\n[3/4] LGTA: loading from cache ...")
-            _, y_test, _, _ = _load_shared_test_data(cache)
+            _, y_test, _, _, scale, _, _ = _load_shared_test_data(
+                cache, cfg.window_size
+            )
             p_lstm, p_lin = _load_predictions(lgta_dir)
-            all_results.extend(_results_from_predictions("LGTA", y_test, p_lstm, p_lin))
+            all_results.extend(
+                _results_from_predictions("LGTA", y_test, p_lstm, p_lin, scale)
+            )
         else:
             print("\n[3/4] Evaluating LGTA ...")
+            _, _, _, _, scale, y_mean, y_std = _load_shared_test_data(
+                cache, cfg.window_size
+            )
             X_lgta_aug = np.concatenate([X_orig, X_lgta], axis=1)
-            results, p_lstm, p_lin = _evaluate_method(
+            results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 "LGTA",
                 X_lgta_aug,
                 n_orig_features,
                 cfg.window_size,
                 X_test_windows,
                 y_test,
+                scale,
                 cfg,
+                y_mean,
+                y_std,
             )
             all_results.extend(results)
-            _save_predictions(lgta_dir, p_lstm, p_lin)
+            _save_predictions(lgta_dir, p_lstm, p_lin, f_lstm, f_lin)
             _save_synthetic(lgta_dir, X_lgta)
 
     benchmarks_to_run = cfg.benchmark_generators
@@ -706,15 +1001,17 @@ def run_downstream_forecasting(
 
     if benchmarks_to_run:
         print(f"\n[4/4] Evaluating {len(benchmarks_to_run)} benchmark method(s) ...")
+        _, y_test, _, _, scale, y_mean, y_std = _load_shared_test_data(
+            cache, cfg.window_size
+        )
         for gen in benchmarks_to_run:
             name = gen.name
             method_d = _method_dir(cache, name)
             if _has_predictions(method_d):
                 print(f"  {name}: loading from cache ...")
-                _, y_test, _, _ = _load_shared_test_data(cache)
                 p_lstm, p_lin = _load_predictions(method_d)
                 all_results.extend(
-                    _results_from_predictions(name, y_test, p_lstm, p_lin)
+                    _results_from_predictions(name, y_test, p_lstm, p_lin, scale)
                 )
                 continue
             X_synth: np.ndarray
@@ -730,23 +1027,29 @@ def run_downstream_forecasting(
                 X_synth = np.clip(X_synth, a_min=0, a_max=None)
                 _save_synthetic(method_d, X_synth)
             X_aug = np.concatenate([X_orig, X_synth], axis=1)
-            results, p_lstm, p_lin = _evaluate_method(
+            results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 name,
                 X_aug,
                 n_orig_features,
                 cfg.window_size,
                 X_test_windows,
                 y_test,
+                scale,
                 cfg,
+                y_mean,
+                y_std,
             )
             all_results.extend(results)
-            _save_predictions(method_d, p_lstm, p_lin)
+            _save_predictions(method_d, p_lstm, p_lin, f_lstm, f_lin)
 
     _print_results(all_results)
     effective_out = cfg.output_dir / _lgta_config_slug(cfg)
     print(f"\nResults written to: {effective_out}")
     _save_results(all_results, effective_out)
     _plot_original_vs_generated(cache, effective_out, cfg, n_series=6, seed=SEED)
+    _plot_predictions_by_method_forecaster(
+        cache, effective_out, cfg, n_series=3, seed=SEED
+    )
     return all_results
 
 
@@ -760,14 +1063,14 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
         raise FileNotFoundError(
             f"Shared test data missing in {cache}. Run at least one method first."
         )
-    _, y_test, _, _ = _load_shared_test_data(cache)
+    _, y_test, _, _, scale, _, _ = _load_shared_test_data(cache, cfg.window_size)
     all_results: list[ForecastResult] = []
     for method_name in _known_cache_method_names():
         method_dir = _method_dir_for(cache, method_name, cfg)
         if _has_predictions(method_dir):
             p_lstm, p_lin = _load_predictions(method_dir)
             all_results.extend(
-                _results_from_predictions(method_name, y_test, p_lstm, p_lin)
+                _results_from_predictions(method_name, y_test, p_lstm, p_lin, scale)
             )
     if not all_results:
         raise FileNotFoundError(
@@ -778,6 +1081,9 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
     print(f"\nResults written to: {effective_out}")
     _save_results(all_results, effective_out)
     _plot_original_vs_generated(cache, effective_out, cfg, n_series=6, seed=SEED)
+    _plot_predictions_by_method_forecaster(
+        cache, effective_out, cfg, n_series=3, seed=SEED
+    )
     return all_results
 
 
@@ -786,13 +1092,13 @@ def _print_results(results: list[ForecastResult]) -> None:
     print("RESULTS")
     print("=" * 70)
     header = (
-        f"{'Method':<25s}  {'Forecaster':<10s}  {'MSE (median)':>12s}  {'± std':>10s}"
+        f"{'Method':<25s}  {'Forecaster':<10s}  {'MASE (mean)':>12s}  {'± std':>10s}"
     )
     print(header)
     print("-" * 70)
     for r in results:
         print(
-            f"{r.method:<25s}  {r.forecaster:<10s}  {r.mse_median:12.4f}  {r.mse_std:10.4f}"
+            f"{r.method:<25s}  {r.forecaster:<10s}  {r.mase_mean:12.4f}  {r.mase_std:10.4f}"
         )
     print("=" * 70)
 
@@ -800,15 +1106,50 @@ def _print_results(results: list[ForecastResult]) -> None:
 def _save_results(results: list[ForecastResult], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     lines = ["# Downstream Forecasting Results\n"]
-    lines.append("| Method | Forecaster | MSE (median) | ± std |")
+    lines.append("| Method | Forecaster | MASE (mean) | ± std |")
     lines.append("|--------|------------|-------------|-------|")
     for r in results:
         lines.append(
-            f"| {r.method} | {r.forecaster} | {r.mse_median:.4f} | {r.mse_std:.4f} |"
+            f"| {r.method} | {r.forecaster} | {r.mase_mean:.4f} | {r.mase_std:.4f} |"
         )
     out = output_dir / "DOWNSTREAM_RESULTS.md"
     out.write_text("\n".join(lines) + "\n")
     print(f"\nResults saved to {out}")
+    _save_results_by_forecaster(results, output_dir)
+
+
+def _save_results_by_forecaster(
+    results: list[ForecastResult], output_dir: Path
+) -> None:
+    """Write one markdown file per forecaster (LSTM, Linear) with methods ordered by % change vs Original (ascending)."""
+    for forecaster in ("LSTM", "Linear"):
+        subset = [r for r in results if r.forecaster == forecaster]
+        if not subset:
+            continue
+        original = next((r for r in subset if r.method == "Original"), None)
+        lines = [f"# Downstream Forecasting Results — {forecaster}\n"]
+        if original is not None:
+            original_mase = original.mase_mean
+            with_pct = [
+                (r, (r.mase_mean - original_mase) / original_mase * 100.0)
+                for r in subset
+            ]
+            ordered = sorted(with_pct, key=lambda x: x[1])
+            lines.append("| Method | MASE (mean) | ± std | % change vs Original |")
+            lines.append("|--------|-------------|-------|----------------------|")
+            for r, pct in ordered:
+                lines.append(
+                    f"| {r.method} | {r.mase_mean:.4f} | {r.mase_std:.4f} | {pct:+.2f}% |"
+                )
+        else:
+            ordered = sorted(subset, key=lambda r: r.mase_mean)
+            lines.append("| Method | MASE (mean) | ± std |")
+            lines.append("|--------|-------------|-------|")
+            for r in ordered:
+                lines.append(f"| {r.method} | {r.mase_mean:.4f} | {r.mase_std:.4f} |")
+        out = output_dir / f"DOWNSTREAM_RESULTS_{forecaster}.md"
+        out.write_text("\n".join(lines) + "\n")
+        print(f"Results by forecaster saved to {out}")
 
 
 if __name__ == "__main__":
@@ -821,18 +1162,18 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="Dataset name (e.g. tourism_small, traffic, wiki2, labour, tourism, m3). Default: tourism_small.",
+        help="Dataset name (e.g. tourism_small, tourism, wiki2, labour, m3). Default: tourism_small.",
     )
     parser.add_argument(
         "--freq",
         type=str,
         default=None,
-        help="Time series frequency (e.g. Q, D, M). Default: Q for tourism, D for traffic/wiki2, M for labour, Q for m3.",
+        help="Time series frequency (e.g. Q, D, M). Default: Q for tourism, D for wiki2, M for labour, Q for m3.",
     )
     parser.add_argument(
         "--all-datasets",
         action="store_true",
-        help="Run the experiment for all supported datasets (tourism_small, tourism, traffic, wiki2, labour, m3) with their default frequencies.",
+        help="Run the experiment for all supported datasets (tourism_small, tourism, wiki2, labour, m3) with their default frequencies.",
     )
     parser.add_argument(
         "--method",
