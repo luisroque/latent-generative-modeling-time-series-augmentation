@@ -28,7 +28,7 @@ class SweepConfig:
     load_weights: bool = True
     series_to_plot: int = 0
     epochs: int = 1500
-    latent_dim: int = 16
+    latent_dim: int = 4
     kl_anneal_epochs: int = 100
     kl_weight_max: float = 0.1
     equiv_weight: float = 0.0
@@ -403,7 +403,7 @@ if __name__ == "__main__":
     config = SweepConfig(
         dataset_name="tourism_small",
         freq="Q",
-        latent_dim=16,
+        latent_dim=4,
         epochs=1500,
         kl_anneal_epochs=100,
         kl_weight_max=0.1,

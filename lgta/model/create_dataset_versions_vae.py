@@ -119,9 +119,13 @@ class CreateTransformedVersionsCVAE:
         noise_scale: float = 0.1,
         amplitude: float = 1.0,
         scaler_type: str = "standard",
+        weights_suffix: str | None = None,
+        weights_dir: str | Path | None = None,
     ):
         self.dataset_name = dataset_name
         self.input_dir = input_dir
+        self.weights_suffix = weights_suffix or ""
+        self.weights_dir = Path(weights_dir) if weights_dir is not None else None
         self.transf_data = transf_data
         self.freq = freq
         self.test_size = test_size
@@ -261,7 +265,7 @@ class CreateTransformedVersionsCVAE:
         epochs: int = 1000,
         batch_size: int = 8,
         patience: int = 30,
-        latent_dim: int = 16,
+        latent_dim: int = 4,
         learning_rate: float = 0.001,
         hyper_tuning: bool = False,
         load_weights: bool = True,
@@ -306,11 +310,15 @@ class CreateTransformedVersionsCVAE:
         )
         cvae = cvae.to(self.device)
 
-        weights_folder = f"{self.input_dir}assets/model_weights"
+        if self.weights_dir is not None:
+            weights_folder = os.fspath(self.weights_dir)
+        else:
+            weights_folder = f"{self.input_dir}assets/model_weights"
         os.makedirs(weights_folder, exist_ok=True)
+        suffix = f"_{self.weights_suffix}" if self.weights_suffix else ""
         weights_file = os.path.join(
             weights_folder,
-            f"{self.dataset_name}_n{n_main_features}_w{self.window_size}_l{latent_dim}_vae_weights.pt",
+            f"{self.dataset_name}_n{n_main_features}_w{self.window_size}_l{latent_dim}_vae_weights{suffix}.pt",
         )
 
         if os.path.exists(weights_file) and not hyper_tuning and load_weights:

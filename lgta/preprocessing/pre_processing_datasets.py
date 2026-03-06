@@ -10,8 +10,22 @@ from datetime import timedelta
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 from datasetsforecast.hierarchical import HierarchicalData
+from datasetsforecast.m3 import M3
 
 from .utils import generate_groups_data_flat, generate_groups_data_matrix
+
+M3_GROUP_BY_FREQ: dict[str, tuple[str, int, int]] = {
+    "Y": ("Yearly", 1, 6),
+    "Q": ("Quarterly", 4, 8),
+    "M": ("Monthly", 12, 18),
+    "D": ("Other", 1, 8),
+}
+
+HIERARCHICAL_DATASET_PARAMS: dict[str, tuple[int, int]] = {
+    "Traffic": (7, 14),
+    "Wiki2": (7, 14),
+    "Labour": (12, 8),
+}
 
 DATA_DIR = "assets/data"
 
@@ -21,13 +35,17 @@ class PreprocessDatasets:
     Loads and preprocesses datasets into the internal groups dict format.
 
     Supported datasets:
-        - tourism_small: Quarterly Australian Tourism Visits (via datasetsforecast)
-        - synthetic: Randomly generated time series with configurable parameters
+        - tourism_small, tourism: Quarterly Australian Tourism (TourismSmall)
+        - traffic: SF Bay Area daily traffic (HierarchicalData)
+        - wiki2: Daily Wikipedia views (HierarchicalData)
+        - labour: Australian monthly labour (HierarchicalData)
+        - synthetic: Randomly generated time series
+        - m3: M3 competition; freq selects group (Y/Q/M/D).
 
     Attributes
     ----------
     dataset : str
-        Dataset identifier ('tourism_small' or 'synthetic').
+        Dataset identifier (e.g. 'tourism_small', 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3').
     freq : str
         Frequency of the time series (e.g. 'Q', 'D').
     input_dir : str
@@ -68,7 +86,7 @@ class PreprocessDatasets:
         if method is None:
             raise ValueError(
                 f"Unknown dataset '{self.dataset}'. "
-                f"Supported: 'tourism_small', 'synthetic'."
+                f"Supported: 'tourism_small', 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3'."
             )
         return method()
 
@@ -107,6 +125,74 @@ class PreprocessDatasets:
 
         seasonality = 4
         h = 4
+        groups = self._build_groups_dict(
+            pivot, groups_names, groups_idx, seasonality, h
+        )
+        return groups
+
+    def _tourism(self) -> dict:
+        return self._tourism_small()
+
+    def _load_hierarchical_bottom(
+        self, group_name: str, seasonality: int, h: int
+    ) -> dict:
+        data_dir = str(Path(self.input_dir) / DATA_DIR)
+        Y_df, S_df, _ = HierarchicalData.load(
+            directory=data_dir, group=group_name
+        )
+        bottom_ids = S_df.columns.tolist()
+        Y_bottom = Y_df[Y_df["unique_id"].isin(bottom_ids)]
+        pivot = Y_bottom.pivot(index="ds", columns="unique_id", values="y")
+        pivot = pivot.sort_index()
+        pivot = pivot[sorted(pivot.columns)]
+        if self.test_size is not None:
+            pivot = pivot.iloc[:, : self.test_size]
+            bottom_ids = pivot.columns.tolist()
+        groups_names: dict[str, np.ndarray] = {}
+        groups_idx: dict[str, np.ndarray] = {}
+        groups_names["Series"] = np.array(bottom_ids)
+        groups_idx["Series"] = np.arange(len(bottom_ids))
+        return self._build_groups_dict(
+            pivot, groups_names, groups_idx, seasonality, h
+        )
+
+    def _traffic(self) -> dict:
+        seasonality, h = HIERARCHICAL_DATASET_PARAMS["Traffic"]
+        return self._load_hierarchical_bottom("Traffic", seasonality, h)
+
+    def _wiki2(self) -> dict:
+        seasonality, h = HIERARCHICAL_DATASET_PARAMS["Wiki2"]
+        return self._load_hierarchical_bottom("Wiki2", seasonality, h)
+
+    def _labour(self) -> dict:
+        seasonality, h = HIERARCHICAL_DATASET_PARAMS["Labour"]
+        return self._load_hierarchical_bottom("Labour", seasonality, h)
+
+    def _m3(self) -> dict:
+        if self.freq not in M3_GROUP_BY_FREQ:
+            raise ValueError(
+                f"M3 dataset does not support freq '{self.freq}'. "
+                f"Use one of: {list(M3_GROUP_BY_FREQ.keys())}."
+            )
+        group_name, seasonality, h = M3_GROUP_BY_FREQ[self.freq]
+        data_dir = str(Path(self.input_dir) / DATA_DIR)
+        train_df, test_df = M3.load(directory=data_dir, group=group_name)
+        full_df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+        full_df = (
+            full_df.drop_duplicates(subset=["unique_id", "ds"], keep="last")
+            .sort_values(["unique_id", "ds"])
+        )
+        pivot = full_df.pivot(index="ds", columns="unique_id", values="y")
+        pivot = pivot.sort_index()
+        pivot = pivot[sorted(pivot.columns)]
+        if self.test_size is not None:
+            pivot = pivot.iloc[:, : self.test_size]
+        bottom_ids = pivot.columns.tolist()
+        groups_names: dict[str, np.ndarray] = {}
+        groups_idx: dict[str, np.ndarray] = {}
+        series_labels = np.array(bottom_ids)
+        groups_names["Series"] = series_labels
+        groups_idx["Series"] = np.arange(len(bottom_ids))
         groups = self._build_groups_dict(
             pivot, groups_names, groups_idx, seasonality, h
         )

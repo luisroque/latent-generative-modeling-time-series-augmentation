@@ -10,7 +10,7 @@ internally.
 
 import numpy as np
 import torch
-from typing import Literal
+from typing import Literal, Optional
 from lgta.transformations import ManipulateData
 from lgta.model.models import LatentMode
 from lgta.feature_engineering.feature_transformations import (
@@ -42,25 +42,39 @@ def generate_synthetic_data(
     detemporalize_method: Literal["mean", "center"] = "mean",
     clip_to_unit_interval: bool = False,
     latent_mode: LatentMode = LatentMode.TEMPORAL,
+    z_log_var: Optional[np.ndarray] = None,
+    sample_from_posterior: bool = False,
+    rng: Optional[np.random.Generator] = None,
 ) -> np.ndarray:
-    """Generate synthetic data by perturbing latent code z_mean then decoding.
+    """Generate synthetic data by perturbing latent code then decoding.
 
     In TEMPORAL mode, z_mean is (n_windows, W, latent_dim) and is
     detemporalized before transforming. In GLOBAL mode, z_mean is
     (n_windows, latent_dim) and is transformed directly.
+
+    If sample_from_posterior is True, z is drawn from N(z_mean, exp(0.5*z_log_var))
+    before applying the transformation; z_log_var must be provided.
     """
+    z_input = z_mean
+    if sample_from_posterior:
+        if z_log_var is None:
+            raise ValueError("z_log_var is required when sample_from_posterior=True")
+        gen = rng if rng is not None else np.random.default_rng()
+        z_std = np.exp(z_log_var * 0.5)
+        z_input = np.array(gen.normal(z_mean, z_std), dtype=np.float32)
+
     device = next(model.parameters()).device
     window_size = create_dataset_vae.window_size
 
     if latent_mode == LatentMode.GLOBAL:
-        z_norm, _, _ = _normalize_latent(z_mean)
+        z_norm, _, _ = _normalize_latent(z_input)
         z_transf = ManipulateData(
             x=z_norm, transformation=transformation, parameters=list(params),
         ).apply_transf()
-        z_modified = z_mean + (z_transf - z_norm)
+        z_modified = z_input + (z_transf - z_norm)
         z_decode = z_modified
     else:
-        z_full = detemporalize(z_mean, window_size, method="mean")
+        z_full = detemporalize(z_input, window_size, method="mean")
         z_norm, _, _ = _normalize_latent(z_full)
         z_transf = ManipulateData(
             x=z_norm, transformation=transformation, parameters=list(params),

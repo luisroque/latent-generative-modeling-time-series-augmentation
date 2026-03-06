@@ -21,6 +21,133 @@ from lgta.model.generate_data import generate_synthetic_data
 from lgta.model.models import EncoderType, LatentMode
 from lgta.transformations.manipulate_data import ManipulateData
 
+DEFAULT_ABLATION_DATASETS: list[tuple[str, str]] = [
+    ("tourism_small", "Q"),
+    ("tourism", "Q"),
+    ("traffic", "D"),
+    ("wiki2", "D"),
+    ("labour", "M"),
+    ("m3", "Q"),
+]
+
+CACHE_ABLATION_ROOT = Path("assets/cache/component_ablation")
+
+
+def _variant_slug(name: str) -> str:
+    """Safe filename slug from ablation variant name."""
+    slug = "".join(
+        c if c.isalnum() or c in " _-" else "_" for c in name
+    ).replace(" ", "_").replace("-", "_").strip("_")
+    return slug or "variant"
+
+
+def _sigma_filename(sigma: float) -> str:
+    """Filename-safe sigma string (e.g. 0.1 -> 0_1, 2.0 -> 2_0)."""
+    return str(sigma).replace(".", "_")
+
+
+def _plot_original_vs_synthetic_ablation(
+    X_orig: np.ndarray,
+    X_synthetic: np.ndarray,
+    variant_name: str,
+    output_path: Path,
+    n_series: int = 6,
+    seed: int = 42,
+    sigma_label: str | None = None,
+) -> None:
+    """Plot original vs synthetic for one ablation variant (one column, n_series rows)."""
+    n_timesteps, n_total_series = X_orig.shape
+    n_plot = min(n_series, n_total_series)
+    rng = np.random.default_rng(seed)
+    series_indices: np.ndarray = rng.choice(
+        n_total_series, size=n_plot, replace=False
+    )
+    t = np.arange(n_timesteps)
+    fig, axes = plt.subplots(
+        n_plot, 1, figsize=(6, 2.5 * n_plot), sharex=True, squeeze=False
+    )
+    for row, series_idx in enumerate(series_indices):
+        ax = axes[row, 0]
+        ax.plot(t, X_orig[:, series_idx], label="Original", color="C0", alpha=0.9)
+        ax.plot(
+            t,
+            X_synthetic[:, series_idx],
+            label="Generated",
+            color="C1",
+            alpha=0.9,
+        )
+        ax.set_ylabel(f"Series {series_idx}")
+        ax.legend(loc="upper right", fontsize=7)
+    axes[-1, 0].set_xlabel("Time")
+    title = f"{variant_name}: original vs generated"
+    if sigma_label is not None:
+        title += f" (σ={sigma_label})"
+    plt.suptitle(title, y=1.01)
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def _plot_merged_original_vs_synthetic(
+    X_orig: np.ndarray,
+    accumulated: list[tuple[str, float, np.ndarray]],
+    variant_names: list[str],
+    sigma_values: list[float],
+    series_indices: np.ndarray,
+    output_dir: Path,
+    transformation: str | None = None,
+) -> None:
+    """One figure per series: rows=variants, cols=sigmas; each cell original vs generated."""
+    lookup: dict[tuple[str, float], np.ndarray] = {
+        (name, sigma): X for name, sigma, X in accumulated
+    }
+    n_sigmas = len(sigma_values)
+    n_variants = len(variant_names)
+    t = np.arange(X_orig.shape[0])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trans_suffix = f"_{transformation}" if transformation else ""
+    for series_idx in series_indices:
+        fig, axes = plt.subplots(
+            n_variants,
+            n_sigmas,
+            figsize=(2.5 * n_sigmas, 1.8 * n_variants),
+            sharex=True,
+            squeeze=False,
+        )
+        for i_var, name in enumerate(variant_names):
+            for i_sigma, sigma in enumerate(sigma_values):
+                ax = axes[i_var, i_sigma]
+                key = (name, sigma)
+                if key not in lookup:
+                    continue
+                X_syn = lookup[key]
+                ax.plot(t, X_orig[:, series_idx], label="Original", color="C0", alpha=0.9)
+                ax.plot(
+                    t,
+                    X_syn[:, series_idx],
+                    label="Generated",
+                    color="C1",
+                    alpha=0.9,
+                )
+                if i_var == 0:
+                    ax.set_title(f"σ={sigma}", fontsize=9)
+                if i_sigma == 0:
+                    ax.set_ylabel(name, fontsize=8)
+                ax.legend(loc="upper right", fontsize=6)
+        for i_sigma in range(n_sigmas):
+            axes[-1, i_sigma].set_xlabel("Time")
+        title = f"Series {series_idx}: original vs generated (rows=variants, cols=σ)"
+        if transformation:
+            title += f" — {transformation}"
+        fig.suptitle(title, y=1.002)
+        plt.tight_layout()
+        out_path = output_dir / f"ablation_merged_series_{series_idx}{trans_suffix}.png"
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved: {out_path}")
+
 
 ALL_TRANSFORMATIONS: list[str] = [
     "jitter",
@@ -39,10 +166,10 @@ class ComponentAblationConfig:
     latent_mode: LatentMode = LatentMode.TEMPORAL
     equiv_weight: float = 0.0
     encoder_type: EncoderType = EncoderType.FULL
-    latent_dim: int = 16
+    latent_dim: int = 4
     kl_weight_max: float = 0.1
-    kl_anneal_epochs: int = 100
-    epochs: int = 1500
+    kl_anneal_epochs: int = 30
+    epochs: int = 1000
     sigma_values: list[float] = field(
         default_factory=lambda: [0.1, 0.5, 1.0, 2.0, 5.0]
     )
@@ -169,10 +296,28 @@ def run_component_ablation(
     dataset_name: str = "tourism_small",
     freq: str = "Q",
     scaler_type: str = "standard",
+    plots_output_dir: Path | None = None,
+    weights_dir: Path | None = None,
+    plot_synthetic_transformation: str = "jitter",
+    plot_synthetic_sigma: float = 0.5,
+    plot_n_series: int = 6,
+    plot_seed: int = 42,
+    plot_per_sigma: bool = False,
 ) -> list[ComponentAblationResult]:
-    """Train each variant and evaluate across all transformations."""
+    """Train each variant and evaluate across all transformations.
+
+    If plots_output_dir is set, for each variant generates synthetic data
+    and saves original-vs-synthetic plot(s) under plots_output_dir (no subfolders).
+    If weights_dir is set, model weights are saved under that path (per-dataset).
+    If plot_per_sigma is False: one plot per variant using plot_synthetic_sigma.
+    If plot_per_sigma is True: one plot per (variant, sigma) for each sigma in
+    that variant's config.sigma_values, using plot_synthetic_transformation.
+    """
     vae_creator = CreateTransformedVersionsCVAE(
-        dataset_name=dataset_name, freq=freq, scaler_type=scaler_type,
+        dataset_name=dataset_name,
+        freq=freq,
+        scaler_type=scaler_type,
+        weights_dir=weights_dir,
     )
 
     trained_models: dict[str, tuple] = {}
@@ -227,6 +372,71 @@ def run_component_ablation(
             recon_mse=recon_mse,
             transformation_results=transf_results,
         ))
+
+        if plots_output_dir is not None and X_orig is not None:
+            slug = _variant_slug(config.name)
+            rng = np.random.default_rng(plot_seed)
+            if not plot_per_sigma:
+                X_synthetic = generate_synthetic_data(
+                    model,
+                    z_mean,
+                    vae_creator,
+                    plot_synthetic_transformation,
+                    [plot_synthetic_sigma],
+                    latent_mode=config.latent_mode,
+                    rng=rng,
+                )
+                out_path = plots_output_dir / (
+                    f"ablation_original_vs_synthetic_{slug}.png"
+                )
+                _plot_original_vs_synthetic_ablation(
+                    X_orig,
+                    X_synthetic,
+                    config.name,
+                    out_path,
+                    n_series=plot_n_series,
+                    seed=plot_seed,
+                )
+
+    if (
+        plots_output_dir is not None
+        and X_orig is not None
+        and plot_per_sigma
+    ):
+        variant_names = [c.name for c in configs]
+        sigma_values = configs[0].sigma_values
+        rng = np.random.default_rng(plot_seed)
+        n_total_series = X_orig.shape[1]
+        n_merged_series = min(3, n_total_series)
+        series_indices = rng.choice(
+            n_total_series, size=n_merged_series, replace=False
+        )
+        for transformation in ALL_TRANSFORMATIONS:
+            accumulated_synthetics = []
+            for config in configs:
+                model, z_mean, _ = trained_models[config.model_key]
+                for sigma in sigma_values:
+                    X_synthetic = generate_synthetic_data(
+                        model,
+                        z_mean,
+                        vae_creator,
+                        transformation,
+                        [sigma],
+                        latent_mode=config.latent_mode,
+                        rng=rng,
+                    )
+                    accumulated_synthetics.append(
+                        (config.name, sigma, X_synthetic.copy())
+                    )
+            _plot_merged_original_vs_synthetic(
+                X_orig,
+                accumulated_synthetics,
+                variant_names,
+                sigma_values,
+                series_indices,
+                plots_output_dir,
+                transformation=transformation,
+            )
 
     return results
 
@@ -481,13 +691,74 @@ STANDARD_CONFIGS: list[ComponentAblationConfig] = [
 
 
 if __name__ == "__main__":
-    output_dir = Path("assets/results/component_ablation")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    import argparse
 
-    ablation_results = run_component_ablation(STANDARD_CONFIGS)
-    plot_component_ablation(
-        ablation_results,
-        STANDARD_CONFIGS[0].sigma_values,
-        output_dir,
+    parser = argparse.ArgumentParser(
+        description="Run component ablation study for L-GTA (optionally for one or all datasets)."
     )
-    print_component_ablation_report(ablation_results)
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Dataset name (e.g. tourism_small, traffic, wiki2, labour, tourism, m3). Default: tourism_small.",
+    )
+    parser.add_argument(
+        "--freq",
+        type=str,
+        default=None,
+        help="Time series frequency (e.g. Q, D, M). Default: from DEFAULT_ABLATION_DATASETS for the chosen dataset.",
+    )
+    parser.add_argument(
+        "--all-datasets",
+        action="store_true",
+        help="Run ablation for all supported datasets with their default frequencies.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("assets/results/component_ablation"),
+        help="Base directory for results; each dataset gets a subfolder named by dataset (e.g. output_dir/tourism_small/).",
+    )
+    args = parser.parse_args()
+
+    base_output_dir = args.output_dir
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    CACHE_ABLATION_ROOT.mkdir(parents=True, exist_ok=True)
+
+    def run_one(dataset_name: str, freq: str) -> None:
+        dataset_output_dir = base_output_dir / dataset_name
+        dataset_output_dir.mkdir(parents=True, exist_ok=True)
+        weights_dir = CACHE_ABLATION_ROOT / dataset_name / "model_weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n{'='*70}")
+        print(f"Component ablation: dataset={dataset_name}, freq={freq}")
+        print(f"  Output: {dataset_output_dir}")
+        print(f"  Weights: {weights_dir}")
+        print("="*70)
+        ablation_results = run_component_ablation(
+            STANDARD_CONFIGS,
+            dataset_name=dataset_name,
+            freq=freq,
+            plots_output_dir=dataset_output_dir,
+            weights_dir=weights_dir,
+            plot_per_sigma=True,
+        )
+        plot_component_ablation(
+            ablation_results,
+            STANDARD_CONFIGS[0].sigma_values,
+            dataset_output_dir,
+        )
+        print_component_ablation_report(ablation_results)
+
+    if args.all_datasets:
+        for dataset_name, freq in DEFAULT_ABLATION_DATASETS:
+            run_one(dataset_name, freq)
+    else:
+        dataset_name = args.dataset if args.dataset is not None else "tourism_small"
+        freq = args.freq
+        if freq is None:
+            freq = next(
+                (f for d, f in DEFAULT_ABLATION_DATASETS if d == dataset_name),
+                "Q",
+            )
+        run_one(dataset_name, freq)

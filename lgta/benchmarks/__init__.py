@@ -1,6 +1,7 @@
 """Benchmark time series generators for downstream forecasting comparison."""
 
 from lgta.benchmarks.base import TimeSeriesGenerator
+from lgta.benchmarks.diffusion_ts import DiffusionTSGenerator
 from lgta.benchmarks.direct import DirectTransformGenerator
 from lgta.benchmarks.timegan import TimeGANGenerator
 from lgta.benchmarks.timevae import TimeVAEGenerator
@@ -11,6 +12,7 @@ def get_default_benchmark_generators(seed: int = 42) -> list[TimeSeriesGenerator
     return [
         TimeGANGenerator(seed=seed),
         TimeVAEGenerator(seed=seed),
+        DiffusionTSGenerator(seed=seed),
         DirectTransformGenerator(transformation="jitter", sigma=0.5, seed=seed),
     ]
 
@@ -18,6 +20,7 @@ def get_default_benchmark_generators(seed: int = 42) -> list[TimeSeriesGenerator
 __all__ = [
     "TimeSeriesGenerator",
     "DirectTransformGenerator",
+    "DiffusionTSGenerator",
     "TimeGANGenerator",
     "TimeVAEGenerator",
     "get_default_benchmark_generators",

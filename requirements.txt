@@ -9,3 +9,5 @@ scikit-optimize==0.10.2
 joypy==0.2.6
 datasetsforecast==1.0.1
 pymdma==0.2.2
+einops>=0.6.0
+ema-pytorch>=0.2.1
