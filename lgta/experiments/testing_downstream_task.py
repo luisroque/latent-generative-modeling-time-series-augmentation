@@ -20,7 +20,7 @@ SEED = 42
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-dataset = "tourism_small"
+dataset = "tourism"
 freq = "Q"
 
 transformations = [

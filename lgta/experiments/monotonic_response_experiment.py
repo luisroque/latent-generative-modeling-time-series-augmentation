@@ -20,7 +20,7 @@ from lgta.transformations.manipulate_data import ManipulateData
 class SweepConfig:
     """Configuration for the monotonic response sweep experiment."""
 
-    dataset_name: str = "tourism_small"
+    dataset_name: str = "tourism"
     freq: str = "Q"
     transformation: str = "jitter"
     sigma_values: list[float] = field(default_factory=lambda: [0.1, 0.5, 1.0, 2.0, 5.0])
@@ -401,7 +401,7 @@ def _run_signature_analysis(
 if __name__ == "__main__":
     base_dir = Path("assets/results/monotonic_response_tourism")
     config = SweepConfig(
-        dataset_name="tourism_small",
+        dataset_name="tourism",
         freq="Q",
         latent_dim=4,
         epochs=1500,

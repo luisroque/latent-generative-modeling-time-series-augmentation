@@ -10,7 +10,7 @@ from lgta.visualization.visualize_transformed_datasets import Visualizer
 
 class TestCreateTransformedDatasets(unittest.TestCase):
     def setUp(self):
-        self.dataset = "tourism_small"
+        self.dataset = "tourism"
         self.freq = "Q"
         self.transformed_datasets = CreateTransformedVersions(
             self.dataset, freq=self.freq
@@ -47,7 +47,7 @@ class TestCreateTransformedDatasets(unittest.TestCase):
             transformed_datasets.y_loaded_transformed.shape, (6, 10, 36, 56)
         )
 
-    def test_create_transformations_with_tourism_small_dataset_drift(self):
+    def test_create_transformations_with_tourism_dataset_drift(self):
         mean_sim_drift_version_1 = ComputeSimilarities(
             dataset=self.transformed_datasets.y,
             transf_dataset=self.transformed_datasets.y_new_all[3, 0, 9],

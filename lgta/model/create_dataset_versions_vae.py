@@ -36,21 +36,47 @@ class InvalidFrequencyError(Exception):
 
 
 class TimeSeriesDataset(TorchDataset):
-    """PyTorch Dataset wrapping dynamic features and input data tensors."""
+    """PyTorch Dataset wrapping dynamic features and input data tensors.
+    Optionally holds a mask (True = observed) for masked reconstruction loss.
+    """
 
     def __init__(
-        self, dynamic_features: np.ndarray, input_data: np.ndarray
+        self,
+        dynamic_features: np.ndarray,
+        input_data: np.ndarray,
+        mask_data: np.ndarray | None = None,
     ) -> None:
         dyn = np.array(dynamic_features, dtype=np.float32, copy=True)
         inp = np.array(input_data, dtype=np.float32, copy=True)
         self.dynamic_features = torch.from_numpy(dyn)
         self.input_data = torch.from_numpy(inp)
+        self.mask_data = (
+            torch.from_numpy(np.array(mask_data, dtype=np.float32, copy=True))
+            if mask_data is not None
+            else None
+        )
 
     def __len__(self) -> int:
         return len(self.input_data)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.dynamic_features[idx], self.input_data[idx]
+    def __getitem__(
+        self, idx: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        m = self.mask_data[idx] if self.mask_data is not None else None
+        return self.dynamic_features[idx], self.input_data[idx], m
+
+
+def _collate_with_optional_mask(
+    batch: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Collate batch; if all third elements are None, return None for mask."""
+    from torch.utils.data.dataloader import default_collate
+
+    dyn = default_collate([b[0] for b in batch])
+    inp = default_collate([b[1] for b in batch])
+    thirds = [b[2] for b in batch]
+    mask = default_collate(thirds) if all(t is not None for t in thirds) else None
+    return dyn, inp, mask
 
 
 def _get_device() -> torch.device:
@@ -92,7 +118,7 @@ class CreateTransformedVersionsCVAE:
     Handles data preprocessing, model fitting, prediction, and generation of transformed time series.
 
     Args:
-        dataset_name: Dataset identifier ('tourism_small' or 'synthetic').
+        dataset_name: Dataset identifier ('tourism' or 'synthetic').
         freq: Frequency of the time series data.
         input_dir: Root directory for data and assets. Defaults to "./".
         transf_data: Transformation scope ('whole' or 'train'). Defaults to "whole".
@@ -145,6 +171,8 @@ class CreateTransformedVersionsCVAE:
         self.n_features = self.s
         self.n_train = self.n - self.window_size + 1
         self.groups = list(self.dataset["train"]["groups_names"].keys())
+        _mask = self.dataset["predict"].get("valid_mask")
+        self.valid_mask = _mask.astype(bool) if _mask is not None else None
         self.df = pd.DataFrame(data)
         dates_series = pd.to_datetime(self.dataset["dates"][: self.n])
         self.df = self.df.set_index(dates_series)
@@ -234,7 +262,8 @@ class CreateTransformedVersionsCVAE:
         Returns:
             Tuple of (dynamic_features_inp, X_inp) as numpy arrays.
         """
-        self.X_train_raw = self.df.astype(np.float32).to_numpy()
+        raw = self.df.astype(np.float32).to_numpy()
+        self.X_train_raw = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self.scaler_type == "standard":
             self.scaler_target = StandardScaler().fit(self.X_train_raw)
@@ -291,6 +320,17 @@ class CreateTransformedVersionsCVAE:
         n_main_features = X_inp_np.shape[-1]
         n_dyn_features = dynamic_features_np.shape[-1]
 
+        mask_windows: np.ndarray | None = None
+        if self.valid_mask is not None:
+            n_win = X_inp_np.shape[0]
+            mask_windows = np.zeros(
+                (n_win, self.window_size, n_main_features), dtype=np.float32
+            )
+            for i in range(n_win):
+                mask_windows[i] = self.valid_mask[
+                    i : i + self.window_size, :n_main_features
+                ].astype(np.float32)
+
         encoder, decoder = get_CVAE(
             window_size=self.window_size,
             n_main_features=n_main_features,
@@ -335,8 +375,15 @@ class CreateTransformedVersionsCVAE:
                     "training from scratch."
                 )
 
-        dataset = TimeSeriesDataset(dynamic_features_np, X_inp_np)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        dataset = TimeSeriesDataset(
+            dynamic_features_np, X_inp_np, mask_data=mask_windows
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=_collate_with_optional_mask,
+        )
 
         optimizer = torch.optim.Adam(
             cvae.parameters(), lr=learning_rate, weight_decay=0.0001
@@ -388,12 +435,15 @@ class CreateTransformedVersionsCVAE:
             epoch_equiv = 0.0
             n_batches = 0
 
-            for dyn_feat, x_inp in dataloader:
+            for dyn_feat, x_inp, recon_mask in dataloader:
                 dyn_feat = dyn_feat.to(self.device)
                 x_inp = x_inp.to(self.device)
+                mask_batch = (
+                    recon_mask.to(self.device) if recon_mask is not None else None
+                )
 
                 optimizer.zero_grad()
-                losses = cvae.compute_loss(dyn_feat, x_inp)
+                losses = cvae.compute_loss(dyn_feat, x_inp, recon_mask=mask_batch)
                 losses["loss"].backward()
                 torch.nn.utils.clip_grad_norm_(
                     cvae.parameters(), max_norm=grad_clip_norm

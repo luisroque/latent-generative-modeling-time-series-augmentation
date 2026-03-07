@@ -332,12 +332,20 @@ class CVAE(nn.Module):
         return self.decoder(z_mean, dynamic_features)
 
     def compute_loss(
-        self, dynamic_features: torch.Tensor, inp_data: torch.Tensor
+        self,
+        dynamic_features: torch.Tensor,
+        inp_data: torch.Tensor,
+        recon_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         z_mean, z_log_var, z = self.encoder(dynamic_features, inp_data)
         pred = self.decoder(z, dynamic_features)
 
-        reconstruction_loss = torch.mean((inp_data - pred) ** 2)
+        sq = (inp_data - pred) ** 2
+        if recon_mask is not None:
+            n_valid = recon_mask.sum().clamp(min=1.0)
+            reconstruction_loss = (sq * recon_mask).sum() / n_valid
+        else:
+            reconstruction_loss = torch.mean(sq)
         kl_per_dim = -0.5 * (
             1 + z_log_var - z_mean.pow(2) - z_log_var.exp()
         )

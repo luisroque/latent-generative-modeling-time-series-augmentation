@@ -22,7 +22,6 @@ from lgta.model.models import EncoderType, LatentMode
 from lgta.transformations.manipulate_data import ManipulateData
 
 DEFAULT_ABLATION_DATASETS: list[tuple[str, str]] = [
-    ("tourism_small", "Q"),
     ("tourism", "Q"),
     ("wiki2", "D"),
     ("labour", "M"),
@@ -292,7 +291,7 @@ def _evaluate_transformation(
 
 def run_component_ablation(
     configs: list[ComponentAblationConfig],
-    dataset_name: str = "tourism_small",
+    dataset_name: str = "tourism",
     freq: str = "Q",
     scaler_type: str = "standard",
     plots_output_dir: Path | None = None,
@@ -699,7 +698,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="Dataset name (e.g. tourism_small, tourism, wiki2, labour, m3). Default: tourism_small.",
+        help="Dataset name (e.g. tourism, wiki2, labour, m3). Default: tourism.",
     )
     parser.add_argument(
         "--freq",
@@ -716,7 +715,7 @@ if __name__ == "__main__":
         "--output-dir",
         type=Path,
         default=Path("assets/results/component_ablation"),
-        help="Base directory for results; each dataset gets a subfolder named by dataset (e.g. output_dir/tourism_small/).",
+        help="Base directory for results; each dataset gets a subfolder named by dataset (e.g. output_dir/tourism/).",
     )
     args = parser.parse_args()
 
@@ -753,7 +752,7 @@ if __name__ == "__main__":
         for dataset_name, freq in DEFAULT_ABLATION_DATASETS:
             run_one(dataset_name, freq)
     else:
-        dataset_name = args.dataset if args.dataset is not None else "tourism_small"
+        dataset_name = args.dataset if args.dataset is not None else "tourism"
         freq = args.freq
         if freq is None:
             freq = next(

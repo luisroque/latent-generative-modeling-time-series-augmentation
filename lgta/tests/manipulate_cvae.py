@@ -12,7 +12,7 @@ class TestModel(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.dataset_name = "tourism_small"
+        self.dataset_name = "tourism"
         self.freq = "Q"
 
         self.create_dataset_vae = CreateTransformedVersionsCVAE(

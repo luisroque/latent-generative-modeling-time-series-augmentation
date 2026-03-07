@@ -5,7 +5,7 @@ from lgta.transformations.create_dataset_versions import CreateTransformedVersio
 
 class TestVisualizeTransformedDatasets(unittest.TestCase):
     def setUp(self):
-        self.dataset = "tourism_small"
+        self.dataset = "tourism"
 
     def test_read_files(self):
         transformed_datasets = CreateTransformedVersions(self.dataset, freq="Q")

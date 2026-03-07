@@ -47,7 +47,7 @@ def quick_evaluation_example():
     print("\nRunning evaluation for each transformation with n_repetitions=3")
     print("Model and benchmark use the same param per transformation.\n")
 
-    dataset = "tourism_small"
+    dataset = "tourism"
     freq = "Q"
     base_output = Path("assets/results/quick_example")
 

@@ -32,7 +32,6 @@ from lgta.benchmarks import (
 SEED = 42
 
 DEFAULT_DATASET_CONFIGS: list[tuple[str, str]] = [
-    ("tourism_small", "Q"),
     ("tourism", "Q"),
     ("wiki2", "D"),
     ("labour", "M"),
@@ -54,7 +53,7 @@ class ForecastResult:
 class ExperimentConfig:
     """Top-level knobs for the downstream forecasting experiment."""
 
-    dataset_name: str = "tourism_small"
+    dataset_name: str = "tourism"
     freq: str = "Q"
     window_size: int = 10
     forecast_epochs: int = 200
@@ -136,12 +135,52 @@ def _prepare_windows(
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 
-def _mase_scale(X_train: np.ndarray, y_train: np.ndarray) -> float:
-    """In-sample MAE of naive (persistence) forecast. Used as MASE denominator."""
+def _y_train_mask_from_valid_mask(
+    valid_mask: np.ndarray | None,
+    window_size: int,
+    n_train: int,
+    n_orig_features: int,
+) -> np.ndarray | None:
+    """Mask for y_train windows: True where the predicted timestep was observed. Shape (n_train, n_orig_features)."""
+    if valid_mask is None:
+        return None
+    return valid_mask[window_size : window_size + n_train, :n_orig_features].copy()
+
+
+def _y_test_mask_from_valid_mask(
+    valid_mask: np.ndarray | None,
+    window_size: int,
+    n_train: int,
+    n_test: int,
+    n_orig_features: int,
+) -> np.ndarray | None:
+    """Mask for y_test windows: True where the predicted timestep was observed. Shape (n_test, n_orig_features)."""
+    if valid_mask is None:
+        return None
+    return valid_mask[
+        window_size + n_train : window_size + n_train + n_test, :n_orig_features
+    ].copy()
+
+
+def _mase_scale(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    y_train_mask: np.ndarray | None = None,
+) -> float:
+    """In-sample MAE of naive (persistence) forecast. Used as MASE denominator.
+    If y_train_mask is provided (True = observed), scale is computed only over valid positions.
+    """
     n_out = y_train.shape[1]
     naive = X_train[:, -1, :n_out].astype(np.float64)
     y = y_train.astype(np.float64)
-    scale = float(np.mean(np.abs(y - naive)))
+    diff = np.abs(y - naive)
+    if y_train_mask is not None:
+        n_valid = np.sum(y_train_mask)
+        if n_valid == 0:
+            return 1.0
+        scale = float(np.sum(diff * y_train_mask) / n_valid)
+    else:
+        scale = float(np.mean(diff))
     return scale if scale > 0 else 1.0
 
 
@@ -222,6 +261,7 @@ def _evaluate_method(
     cfg: ExperimentConfig,
     y_train_mean: np.ndarray | None = None,
     y_train_std: np.ndarray | None = None,
+    y_test_mask: np.ndarray | None = None,
 ) -> tuple[list[ForecastResult], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Returns (results, predictions_LSTM, predictions_Linear, fitted_LSTM, fitted_Linear).
 
@@ -229,6 +269,7 @@ def _evaluate_method(
     fitted_* have shape (n_runs, n_train, n_orig_features).
     If y_train_mean and y_train_std are provided, targets are scaled before training
     and predictions/fitted are unscaled before return (so outputs stay in original scale).
+    If y_test_mask is provided (True = observed), MASE is computed only over valid positions.
     """
     X_win, y_win = _prepare_windows(X_data, window_size)
     n_test = X_test_windows.shape[0]
@@ -311,22 +352,12 @@ def _evaluate_method(
                 scale,
                 cfg,
             )
-            mase_runs.append(mase)
             if forecaster_name == "LSTM":
                 preds_lstm_list.append(preds)
                 fitted_lstm_list.append(fitted)
             else:
                 preds_linear_list.append(preds)
                 fitted_linear_list.append(fitted)
-        if not use_scale:
-            results.append(
-                ForecastResult(
-                    method=method_name,
-                    forecaster=forecaster_name,
-                    mase_mean=float(np.mean(mase_runs)),
-                    mase_std=float(np.std(mase_runs)),
-                )
-            )
     preds_LSTM = np.stack(preds_lstm_list, axis=0)
     preds_Linear = np.stack(preds_linear_list, axis=0)
     fitted_LSTM = np.stack(fitted_lstm_list, axis=0)
@@ -336,22 +367,9 @@ def _evaluate_method(
         preds_Linear = preds_Linear * y_train_std + y_train_mean
         fitted_LSTM = fitted_LSTM * y_train_std + y_train_mean
         fitted_Linear = fitted_Linear * y_train_std + y_train_mean
-        mase_lstm = np.mean(np.abs(y_test - preds_LSTM), axis=(1, 2)) / scale
-        mase_linear = np.mean(np.abs(y_test - preds_Linear), axis=(1, 2)) / scale
-        results = [
-            ForecastResult(
-                method=method_name,
-                forecaster="LSTM",
-                mase_mean=float(np.mean(mase_lstm)),
-                mase_std=float(np.std(mase_lstm)),
-            ),
-            ForecastResult(
-                method=method_name,
-                forecaster="Linear",
-                mase_mean=float(np.mean(mase_linear)),
-                mase_std=float(np.std(mase_linear)),
-            ),
-        ]
+    results = _results_from_predictions(
+        method_name, y_test, preds_LSTM, preds_Linear, scale, y_test_mask
+    )
     return results, preds_LSTM, preds_Linear, fitted_LSTM, fitted_Linear
 
 
@@ -418,6 +436,7 @@ def _save_shared_test_data(
     n_orig_features: int,
     scale: float,
     window_size: int,
+    valid_mask: np.ndarray | None = None,
 ) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     np.save(cache_dir / "X_orig.npy", X_orig)
@@ -426,6 +445,8 @@ def _save_shared_test_data(
     np.save(cache_dir / "scale.npy", np.array(scale, dtype=np.float64))
     (cache_dir / "n_orig_features.txt").write_text(str(n_orig_features))
     (cache_dir / "window_size.txt").write_text(str(window_size))
+    if valid_mask is not None:
+        np.save(cache_dir / "valid_mask.npy", valid_mask.astype(np.uint8))
     _, y_win = _prepare_windows(X_orig, window_size)
     n_test = X_test_windows.shape[0]
     y_train = y_win[: y_win.shape[0] - n_test, :n_orig_features]
@@ -439,11 +460,13 @@ def _save_shared_test_data(
 def _load_shared_test_data(
     cache_dir: Path,
     window_size: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, float, np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, float, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     X_orig = np.load(cache_dir / "X_orig.npy")
     y_test = np.load(cache_dir / "y_test.npy")
     X_test_windows = np.load(cache_dir / "X_test_windows.npy")
     n_orig_features = int((cache_dir / "n_orig_features.txt").read_text())
+    valid_mask_path = cache_dir / "valid_mask.npy"
+    valid_mask = np.load(valid_mask_path).astype(bool) if valid_mask_path.exists() else None
     scale_path = cache_dir / "scale.npy"
     if scale_path.exists():
         scale = float(np.load(scale_path))
@@ -452,7 +475,8 @@ def _load_shared_test_data(
         X_win, y_win = _prepare_windows(X_orig, w)
         n_test = X_test_windows.shape[0]
         n_train = X_win.shape[0] - n_test
-        scale = _mase_scale(X_win[:n_train], y_win[:n_train, :n_orig_features])
+        y_train_mask = _y_train_mask_from_valid_mask(valid_mask, w, n_train, n_orig_features)
+        scale = _mase_scale(X_win[:n_train], y_win[:n_train, :n_orig_features], y_train_mask)
     mean_path = cache_dir / "y_train_mean.npy"
     std_path = cache_dir / "y_train_std.npy"
     if mean_path.exists() and std_path.exists():
@@ -468,7 +492,7 @@ def _load_shared_test_data(
         y_train_std = np.maximum(y_train_std, 1e-8)
         np.save(mean_path, y_train_mean)
         np.save(std_path, y_train_std)
-    return X_orig, y_test, X_test_windows, n_orig_features, scale, y_train_mean, y_train_std
+    return X_orig, y_test, X_test_windows, n_orig_features, scale, y_train_mean, y_train_std, valid_mask
 
 
 def _has_shared_test_data(cache_dir: Path) -> bool:
@@ -526,10 +550,24 @@ def _results_from_predictions(
     preds_LSTM: np.ndarray,
     preds_Linear: np.ndarray,
     scale: float,
+    y_test_mask: np.ndarray | None = None,
 ) -> list[ForecastResult]:
-    """Compute ForecastResults from saved predictions (n_runs, n_test, n_out)."""
-    mae_lstm = np.mean(np.abs(y_test - preds_LSTM), axis=(1, 2))
-    mae_linear = np.mean(np.abs(y_test - preds_Linear), axis=(1, 2))
+    """Compute ForecastResults from saved predictions (n_runs, n_test, n_out).
+    If y_test_mask is provided (True = observed), MAE/MASE are computed only over valid positions.
+    """
+    abs_lstm = np.abs(y_test - preds_LSTM)
+    abs_linear = np.abs(y_test - preds_Linear)
+    if y_test_mask is not None:
+        n_valid = np.sum(y_test_mask)
+        if n_valid == 0:
+            mae_lstm = np.full(abs_lstm.shape[0], np.nan)
+            mae_linear = np.full(abs_linear.shape[0], np.nan)
+        else:
+            mae_lstm = np.sum(abs_lstm * y_test_mask, axis=(1, 2)) / n_valid
+            mae_linear = np.sum(abs_linear * y_test_mask, axis=(1, 2)) / n_valid
+    else:
+        mae_lstm = np.mean(abs_lstm, axis=(1, 2))
+        mae_linear = np.mean(abs_linear, axis=(1, 2))
     mase_lstm = mae_lstm / scale
     mase_linear = mae_linear / scale
     return [
@@ -583,7 +621,7 @@ def _plot_original_vs_generated(
     methods = _methods_with_synthetic(cache_dir, cfg)
     if not methods:
         return
-    X_orig, _, _, _, _, _, _ = _load_shared_test_data(cache_dir, cfg.window_size)
+    X_orig, _, _, _, _, _, _, _ = _load_shared_test_data(cache_dir, cfg.window_size)
     n_timesteps, n_total_series = X_orig.shape
     n_plot = min(n_series, n_total_series)
     rng = np.random.RandomState(seed)
@@ -655,7 +693,7 @@ def _plot_predictions_by_method_forecaster(
     ]
     if not method_names:
         return
-    X_orig, y_test, _, n_orig_features, _, _, _ = _load_shared_test_data(
+    X_orig, y_test, _, n_orig_features, _, _, _, _ = _load_shared_test_data(
         cache_dir, cfg.window_size
     )
     _, y_win = _prepare_windows(X_orig, cfg.window_size)
@@ -766,20 +804,29 @@ def _plot_predictions_by_method_forecaster(
 # ---------------------------------------------------------------------------
 
 
-def _load_original_data(cfg: ExperimentConfig) -> np.ndarray:
-    """Load the (n_timesteps, n_series) data matrix without training LGTA."""
+def _load_original_data(
+    cfg: ExperimentConfig,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Load the (n_timesteps, n_series) data matrix and optional valid_mask (True = observed)."""
     from lgta.preprocessing.pre_processing_datasets import PreprocessDatasets
 
     ppc = PreprocessDatasets(dataset=cfg.dataset_name, freq=cfg.freq)
     data = ppc.apply_preprocess()
-    return data["predict"]["data_matrix"].astype(np.float32)
+    X = np.nan_to_num(
+        data["predict"]["data_matrix"].astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0
+    )
+    mask = data["predict"].get("valid_mask")
+    valid_mask = mask.astype(bool) if mask is not None else None
+    return X, valid_mask
 
 
-def _generate_lgta(cfg: ExperimentConfig, cache: Path) -> tuple[np.ndarray, np.ndarray]:
+def _generate_lgta(
+    cfg: ExperimentConfig, cache: Path
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Train LGTA CVAE and generate one augmented dataset.
 
-    Returns (X_orig, X_lgta) both of shape (n_timesteps, n_series).
-    Model weights are stored under cache/model_weights.
+    Returns (X_orig, X_lgta, valid_mask). X_orig and X_lgta have shape (n_timesteps, n_series).
+    valid_mask is (n_timesteps, n_series), True where observed, or None. Model weights under cache/model_weights.
     """
     from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
     from lgta.model.generate_data import generate_synthetic_data
@@ -823,7 +870,10 @@ def _generate_lgta(cfg: ExperimentConfig, cache: Path) -> tuple[np.ndarray, np.n
         sample_from_posterior=cfg.lgta_sample_from_posterior,
         rng=rng,
     )
-    return X_orig, X_lgta
+    valid_mask = getattr(creator, "valid_mask", None)
+    if valid_mask is not None:
+        X_lgta = X_lgta * valid_mask.astype(np.float32)
+    return X_orig, X_lgta, valid_mask
 
 
 # ---------------------------------------------------------------------------
@@ -899,11 +949,11 @@ def run_downstream_forecasting(
 
     if single and method_canonical not in ("original", "lgta"):
         print("\n[1/4] Loading data ...")
-        X_orig = _load_original_data(cfg)
+        X_orig, valid_mask = _load_original_data(cfg)
         X_lgta = None
     else:
         print("\n[1/4] Training LGTA and generating synthetic data ...")
-        X_orig, X_lgta = _generate_lgta(cfg, cache)
+        X_orig, X_lgta, valid_mask = _generate_lgta(cfg, cache)
 
     n_orig_features = X_orig.shape[1]
     X_orig_win, y_orig_win = _prepare_windows(X_orig, cfg.window_size)
@@ -913,12 +963,24 @@ def run_downstream_forecasting(
     y_test = y_orig_win[n_train:]
 
     if not _has_shared_test_data(cache):
-        scale = _mase_scale(X_orig_win[:n_train], y_orig_win[:n_train, :n_orig_features])
+        y_train_mask = _y_train_mask_from_valid_mask(
+            valid_mask, cfg.window_size, n_train, n_orig_features
+        )
+        scale = _mase_scale(
+            X_orig_win[:n_train], y_orig_win[:n_train, :n_orig_features], y_train_mask
+        )
         _save_shared_test_data(
-            cache, X_orig, y_test, X_test_windows, n_orig_features, scale, cfg.window_size
+            cache,
+            X_orig,
+            y_test,
+            X_test_windows,
+            n_orig_features,
+            scale,
+            cfg.window_size,
+            valid_mask,
         )
     else:
-        _, _, _, _, scale, _, _ = _load_shared_test_data(cache, cfg.window_size)
+        _, _, _, _, scale, _, _, _ = _load_shared_test_data(cache, cfg.window_size)
 
     all_results: list[ForecastResult] = []
 
@@ -927,17 +989,26 @@ def run_downstream_forecasting(
         orig_dir = _method_dir(cache, "Original")
         if _has_predictions(orig_dir):
             print("\n[2/4] Original: loading from cache ...")
-            _, y_test, _, _, scale, _, _ = _load_shared_test_data(
+            X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = _load_shared_test_data(
                 cache, cfg.window_size
+            )
+            n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
+            y_test_mask = _y_test_mask_from_valid_mask(
+                valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
             )
             p_lstm, p_lin = _load_predictions(orig_dir)
             all_results.extend(
-                _results_from_predictions("Original", y_test, p_lstm, p_lin, scale)
+                _results_from_predictions(
+                    "Original", y_test, p_lstm, p_lin, scale, y_test_mask
+                )
             )
         else:
             print("\n[2/4] Evaluating Original (no augmentation) ...")
-            _, _, _, _, scale, y_mean, y_std = _load_shared_test_data(
+            _, _, _, _, scale, y_mean, y_std, _ = _load_shared_test_data(
                 cache, cfg.window_size
+            )
+            y_test_mask = _y_test_mask_from_valid_mask(
+                valid_mask, cfg.window_size, n_train, y_test.shape[0], n_orig_features
             )
             results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 "Original",
@@ -950,6 +1021,7 @@ def run_downstream_forecasting(
                 cfg,
                 y_mean,
                 y_std,
+                y_test_mask,
             )
             all_results.extend(results)
             _save_predictions(orig_dir, p_lstm, p_lin, f_lstm, f_lin)
@@ -959,17 +1031,26 @@ def run_downstream_forecasting(
         lgta_dir = _lgta_method_dir(cache, cfg)
         if _has_predictions(lgta_dir):
             print("\n[3/4] LGTA: loading from cache ...")
-            _, y_test, _, _, scale, _, _ = _load_shared_test_data(
+            X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = _load_shared_test_data(
                 cache, cfg.window_size
+            )
+            n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
+            y_test_mask = _y_test_mask_from_valid_mask(
+                valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
             )
             p_lstm, p_lin = _load_predictions(lgta_dir)
             all_results.extend(
-                _results_from_predictions("LGTA", y_test, p_lstm, p_lin, scale)
+                _results_from_predictions(
+                    "LGTA", y_test, p_lstm, p_lin, scale, y_test_mask
+                )
             )
         else:
             print("\n[3/4] Evaluating LGTA ...")
-            _, _, _, _, scale, y_mean, y_std = _load_shared_test_data(
+            _, _, _, _, scale, y_mean, y_std, _ = _load_shared_test_data(
                 cache, cfg.window_size
+            )
+            y_test_mask = _y_test_mask_from_valid_mask(
+                valid_mask, cfg.window_size, n_train, y_test.shape[0], n_orig_features
             )
             X_lgta_aug = np.concatenate([X_orig, X_lgta], axis=1)
             results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
@@ -983,6 +1064,7 @@ def run_downstream_forecasting(
                 cfg,
                 y_mean,
                 y_std,
+                y_test_mask,
             )
             all_results.extend(results)
             _save_predictions(lgta_dir, p_lstm, p_lin, f_lstm, f_lin)
@@ -1001,8 +1083,12 @@ def run_downstream_forecasting(
 
     if benchmarks_to_run:
         print(f"\n[4/4] Evaluating {len(benchmarks_to_run)} benchmark method(s) ...")
-        _, y_test, _, _, scale, y_mean, y_std = _load_shared_test_data(
+        X_orig, y_test, _, n_orig_features, scale, y_mean, y_std, valid_mask = _load_shared_test_data(
             cache, cfg.window_size
+        )
+        n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
+        y_test_mask = _y_test_mask_from_valid_mask(
+            valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
         )
         for gen in benchmarks_to_run:
             name = gen.name
@@ -1011,7 +1097,9 @@ def run_downstream_forecasting(
                 print(f"  {name}: loading from cache ...")
                 p_lstm, p_lin = _load_predictions(method_d)
                 all_results.extend(
-                    _results_from_predictions(name, y_test, p_lstm, p_lin, scale)
+                    _results_from_predictions(
+                        name, y_test, p_lstm, p_lin, scale, y_test_mask
+                    )
                 )
                 continue
             X_synth: np.ndarray
@@ -1025,7 +1113,11 @@ def run_downstream_forecasting(
                 gen.fit(X_orig)
                 X_synth = gen.generate()
                 X_synth = np.clip(X_synth, a_min=0, a_max=None)
+                if valid_mask is not None:
+                    X_synth = X_synth * valid_mask.astype(np.float32)
                 _save_synthetic(method_d, X_synth)
+            if valid_mask is not None:
+                X_synth = X_synth * valid_mask.astype(np.float32)
             X_aug = np.concatenate([X_orig, X_synth], axis=1)
             results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 name,
@@ -1038,6 +1130,7 @@ def run_downstream_forecasting(
                 cfg,
                 y_mean,
                 y_std,
+                y_test_mask,
             )
             all_results.extend(results)
             _save_predictions(method_d, p_lstm, p_lin, f_lstm, f_lin)
@@ -1063,14 +1156,22 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
         raise FileNotFoundError(
             f"Shared test data missing in {cache}. Run at least one method first."
         )
-    _, y_test, _, _, scale, _, _ = _load_shared_test_data(cache, cfg.window_size)
+    X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = _load_shared_test_data(
+        cache, cfg.window_size
+    )
+    n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
+    y_test_mask = _y_test_mask_from_valid_mask(
+        valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
+    )
     all_results: list[ForecastResult] = []
     for method_name in _known_cache_method_names():
         method_dir = _method_dir_for(cache, method_name, cfg)
         if _has_predictions(method_dir):
             p_lstm, p_lin = _load_predictions(method_dir)
             all_results.extend(
-                _results_from_predictions(method_name, y_test, p_lstm, p_lin, scale)
+                _results_from_predictions(
+                    method_name, y_test, p_lstm, p_lin, scale, y_test_mask
+                )
             )
     if not all_results:
         raise FileNotFoundError(
@@ -1162,7 +1263,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="Dataset name (e.g. tourism_small, tourism, wiki2, labour, m3). Default: tourism_small.",
+        help="Dataset name (e.g. tourism, wiki2, labour, m3). Default: tourism.",
     )
     parser.add_argument(
         "--freq",
@@ -1173,7 +1274,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--all-datasets",
         action="store_true",
-        help="Run the experiment for all supported datasets (tourism_small, tourism, wiki2, labour, m3) with their default frequencies.",
+        help="Run the experiment for all supported datasets (tourism, wiki2, labour, m3) with their default frequencies.",
     )
     parser.add_argument(
         "--method",
@@ -1216,7 +1317,7 @@ if __name__ == "__main__":
                 results_only=args.results_only,
             )
     else:
-        dataset_name = args.dataset if args.dataset is not None else "tourism_small"
+        dataset_name = args.dataset if args.dataset is not None else "tourism"
         freq = args.freq
         if freq is None:
             freq = next(

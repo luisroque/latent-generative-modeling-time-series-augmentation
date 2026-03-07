@@ -24,7 +24,7 @@ from lgta.postprocessing.postprocessing_comparison import (
 from lgta.e2e.e2e_processing import e2e_transformation, compare_diff_magnitudes
 
 
-dataset = "tourism_small"
+dataset = "tourism"
 freq = "Q"
 
 

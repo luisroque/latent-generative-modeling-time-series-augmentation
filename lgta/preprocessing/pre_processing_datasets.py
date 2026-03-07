@@ -35,7 +35,7 @@ class PreprocessDatasets:
     Loads and preprocesses datasets into the internal groups dict format.
 
     Supported datasets:
-        - tourism_small, tourism: Quarterly Australian Tourism (TourismSmall)
+        - tourism: Quarterly Australian Tourism (TourismSmall)
         - traffic: SF Bay Area daily traffic (HierarchicalData)
         - wiki2: Daily Wikipedia views (HierarchicalData)
         - labour: Australian monthly labour (HierarchicalData)
@@ -45,7 +45,7 @@ class PreprocessDatasets:
     Attributes
     ----------
     dataset : str
-        Dataset identifier (e.g. 'tourism_small', 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3').
+        Dataset identifier (e.g. 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3').
     freq : str
         Frequency of the time series (e.g. 'Q', 'D').
     input_dir : str
@@ -86,11 +86,11 @@ class PreprocessDatasets:
         if method is None:
             raise ValueError(
                 f"Unknown dataset '{self.dataset}'. "
-                f"Supported: 'tourism_small', 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3'."
+                f"Supported: 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3'."
             )
         return method()
 
-    def _tourism_small(self) -> dict:
+    def _tourism(self) -> dict:
         data_dir = str(Path(self.input_dir) / DATA_DIR)
         Y_df, S_df, tags = HierarchicalData.load(
             directory=data_dir, group="TourismSmall"
@@ -129,9 +129,6 @@ class PreprocessDatasets:
             pivot, groups_names, groups_idx, seasonality, h
         )
         return groups
-
-    def _tourism(self) -> dict:
-        return self._tourism_small()
 
     def _load_hierarchical_bottom(
         self, group_name: str, seasonality: int, h: int
@@ -176,17 +173,21 @@ class PreprocessDatasets:
             )
         group_name, seasonality, h = M3_GROUP_BY_FREQ[self.freq]
         data_dir = str(Path(self.input_dir) / DATA_DIR)
-        train_df, test_df = M3.load(directory=data_dir, group=group_name)
-        full_df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+        load_result = M3.load(directory=data_dir, group=group_name)
+        # Use only the first return: target series (unique_id, ds, y). Second/third are
+        # optional exogenous/static; concatenating them produced wrong pivot and NaNs.
         full_df = (
-            full_df.drop_duplicates(subset=["unique_id", "ds"], keep="last")
+            load_result[0]
+            .drop_duplicates(subset=["unique_id", "ds"], keep="last")
             .sort_values(["unique_id", "ds"])
         )
         pivot = full_df.pivot(index="ds", columns="unique_id", values="y")
         pivot = pivot.sort_index()
         pivot = pivot[sorted(pivot.columns)]
+        valid_mask = ~pivot.isna()
         if self.test_size is not None:
             pivot = pivot.iloc[:, : self.test_size]
+            valid_mask = valid_mask.iloc[:, : self.test_size]
         bottom_ids = pivot.columns.tolist()
         groups_names: dict[str, np.ndarray] = {}
         groups_idx: dict[str, np.ndarray] = {}
@@ -194,7 +195,7 @@ class PreprocessDatasets:
         groups_names["Series"] = series_labels
         groups_idx["Series"] = np.arange(len(bottom_ids))
         groups = self._build_groups_dict(
-            pivot, groups_names, groups_idx, seasonality, h
+            pivot, groups_names, groups_idx, seasonality, h, valid_mask=valid_mask.values
         )
         return groups
 
@@ -205,6 +206,7 @@ class PreprocessDatasets:
         groups_idx: dict[str, np.ndarray],
         seasonality: int,
         h: int,
+        valid_mask: np.ndarray | None = None,
     ) -> dict:
         """Build the internal groups dict from a wide-format DataFrame."""
         dates = list(df_pivot.index)
@@ -232,6 +234,9 @@ class PreprocessDatasets:
                 "x_values": list(range(n)),
                 "g_number": len(groups_names),
             }
+            if valid_mask is not None:
+                m = valid_mask[:n] if split == "train" else valid_mask
+                groups[split]["valid_mask"] = m.astype(np.uint8)
 
         groups["predict"]["original_data"] = data.T.ravel()
         groups["seasonality"] = seasonality

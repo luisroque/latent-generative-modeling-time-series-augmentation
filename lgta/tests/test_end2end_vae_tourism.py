@@ -8,7 +8,7 @@ from lgta.transformations.compute_similarities_summary_metrics import (
 class TestEndToEndVAETourismSmall(unittest.TestCase):
     def setUp(self) -> None:
         self.create_dataset_vae = CreateTransformedVersionsCVAE(
-            dataset_name="tourism_small", freq="Q", test_size=5
+            dataset_name="tourism", freq="Q", test_size=5
         )
         self.model, _, _ = self.create_dataset_vae.fit(
             epochs=1, load_weights=False, kl_anneal_epochs=1,

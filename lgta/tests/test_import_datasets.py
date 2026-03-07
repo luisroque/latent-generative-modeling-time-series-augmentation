@@ -3,22 +3,22 @@ import numpy as np
 import lgta as tsag
 
 
-class TestImportTourismSmall(unittest.TestCase):
-    def test_import_tourism_small_default(self):
+class TestImportTourism(unittest.TestCase):
+    def test_import_tourism_default(self):
         data = tsag.preprocessing.PreprocessDatasets(
-            "tourism_small", freq="Q"
+            "tourism", freq="Q"
         ).apply_preprocess()
         self.assertEqual(data["train"]["data"].shape, (32, 56))
 
-    def test_import_tourism_small_test_size(self):
+    def test_import_tourism_test_size(self):
         data = tsag.preprocessing.PreprocessDatasets(
-            "tourism_small", freq="Q", test_size=10
+            "tourism", freq="Q", test_size=10
         ).apply_preprocess()
         self.assertEqual(data["train"]["data"].shape, (32, 10))
 
-    def test_import_tourism_small_has_required_keys(self):
+    def test_import_tourism_has_required_keys(self):
         data = tsag.preprocessing.PreprocessDatasets(
-            "tourism_small", freq="Q"
+            "tourism", freq="Q"
         ).apply_preprocess()
         self.assertIn("train", data)
         self.assertIn("predict", data)
@@ -30,9 +30,9 @@ class TestImportTourismSmall(unittest.TestCase):
         self.assertIn("h", data)
         self.assertIn("dates", data)
 
-    def test_import_tourism_small_groups(self):
+    def test_import_tourism_groups(self):
         data = tsag.preprocessing.PreprocessDatasets(
-            "tourism_small", freq="Q"
+            "tourism", freq="Q"
         ).apply_preprocess()
         expected_groups = {"Purpose", "State", "CityType"}
         self.assertEqual(set(data["train"]["groups_names"].keys()), expected_groups)
@@ -40,15 +40,15 @@ class TestImportTourismSmall(unittest.TestCase):
         self.assertEqual(len(data["train"]["groups_names"]["State"]), 7)
         self.assertEqual(len(data["train"]["groups_names"]["CityType"]), 2)
 
-    def test_import_tourism_small_predict_shape(self):
+    def test_import_tourism_predict_shape(self):
         data = tsag.preprocessing.PreprocessDatasets(
-            "tourism_small", freq="Q"
+            "tourism", freq="Q"
         ).apply_preprocess()
         self.assertEqual(data["predict"]["data_matrix"].shape, (36, 56))
 
-    def test_import_tourism_small_seasonality_and_horizon(self):
+    def test_import_tourism_seasonality_and_horizon(self):
         data = tsag.preprocessing.PreprocessDatasets(
-            "tourism_small", freq="Q"
+            "tourism", freq="Q"
         ).apply_preprocess()
         self.assertEqual(data["seasonality"], 4)
         self.assertEqual(data["h"], 4)

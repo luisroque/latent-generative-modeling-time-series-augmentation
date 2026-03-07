@@ -20,7 +20,7 @@ from lgta.evaluation.evaluation_pipeline import (
 
 
 def run_comprehensive_evaluation(
-    dataset: str = "tourism_small",
+    dataset: str = "tourism",
     freq: str = "Q",
     n_repetitions: int = 10,
 ):
@@ -28,7 +28,7 @@ def run_comprehensive_evaluation(
     Run comprehensive evaluation for a dataset.
 
     Args:
-        dataset: Dataset name ('tourism_small' or 'synthetic')
+        dataset: Dataset name ('tourism' or 'synthetic')
         freq: Frequency ('Q', 'D', etc.)
         n_repetitions: Number of evaluation runs for statistical robustness
     """
@@ -50,7 +50,7 @@ def run_comprehensive_evaluation(
     print("\n[2/4] Defining transformations to evaluate...")
 
     # Transformation configurations based on the dataset
-    if dataset == "tourism_small":
+    if dataset == "tourism":
         transformations = [
             {
                 "name": "jitter",
@@ -202,7 +202,7 @@ def generate_overall_summary(all_reports: dict, dataset: str):
 
 
 def compare_transformation_magnitudes(
-    dataset: str = "tourism_small",
+    dataset: str = "tourism",
     freq: str = "Q",
     transformation: str = "jitter",
     magnitudes: list = None,
@@ -370,7 +370,7 @@ def visualize_magnitude_comparison(results: dict, transformation: str, dataset: 
 # Example usage
 if __name__ == "__main__":
     # Configuration
-    DATASET = "tourism_small"
+    DATASET = "tourism"
     FREQ = "Q"
     N_REPETITIONS = 10
 
