@@ -9,6 +9,8 @@ num_layers-1, and the original loss/training schedule (E_loss, G_loss with
 gamma, two-moment loss, D only when loss > 0.15, generator 2x per step).
 """
 
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -159,6 +161,44 @@ class TimeGANGenerator(TimeSeriesGenerator):
         self._train_embedder(X, ori_time, max_seq_len)
         self._train_supervisor_only(X, ori_time, max_seq_len, z_dim)
         self._train_joint(X, ori_time, max_seq_len, z_dim, no)
+
+    def save_weights(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "_n_timesteps": self._n_timesteps,
+                "_n_series": self._n_series,
+                "_min_val": self._min_val,
+                "_max_val": self._max_val,
+                "emb": self._emb.state_dict(),
+                "rec": self._rec.state_dict(),
+                "sup": self._sup.state_dict(),
+                "gen": self._gen.state_dict(),
+                "dis": self._dis.state_dict(),
+            },
+            path,
+        )
+
+    def load_weights(self, path: Path) -> bool:
+        if not path.exists():
+            return False
+        state = torch.load(path, map_location=self.device, weights_only=False)
+        self._n_timesteps = state["_n_timesteps"]
+        self._n_series = state["_n_series"]
+        self._min_val = state["_min_val"]
+        self._max_val = state["_max_val"]
+        D = self._n_series
+        self._emb = _Embedder(1, self.hidden_dim, self.n_layers).to(self.device)
+        self._rec = _Recovery(self.hidden_dim, 1, self.n_layers).to(self.device)
+        self._sup = _Supervisor(self.hidden_dim, self.n_layers).to(self.device)
+        self._gen = _Generator(D, self.hidden_dim, self.n_layers).to(self.device)
+        self._dis = _Discriminator(self.hidden_dim, self.n_layers).to(self.device)
+        self._emb.load_state_dict(state["emb"])
+        self._rec.load_state_dict(state["rec"])
+        self._sup.load_state_dict(state["sup"])
+        self._gen.load_state_dict(state["gen"])
+        self._dis.load_state_dict(state["dis"])
+        return True
 
     def _random_z(self, batch_size: int, seq_len: int, z_dim: int) -> torch.Tensor:
         """Random Z uniform in [0, 1] as in original random_generator."""

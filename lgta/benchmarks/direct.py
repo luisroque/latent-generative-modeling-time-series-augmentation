@@ -29,6 +29,12 @@ class DirectTransformGenerator(TimeSeriesGenerator):
     def name(self) -> str:
         return f"Direct({self.transformation})"
 
+    def _model_state(self) -> dict:
+        return {"data_scaled": self._data_scaled}
+
+    def _restore_model_state(self, state: dict) -> None:
+        self._data_scaled = state["data_scaled"]
+
     def _fit(self, data: np.ndarray) -> None:
         self._data_scaled = data.copy()
 

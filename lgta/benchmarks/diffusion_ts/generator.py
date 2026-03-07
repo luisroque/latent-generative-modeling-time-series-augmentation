@@ -66,6 +66,46 @@ class DiffusionTSGenerator(TimeSeriesGenerator):
         self.batch_size = batch_size
         self.lr = lr
 
+    def _model_state(self) -> dict:
+        return {
+            "diffusion": self._diffusion.state_dict(),
+            "ema_model": self._ema.ema_model.state_dict(),
+            "window_min": self._window_min,
+            "window_max": self._window_max,
+            "actual_seq_length": self._actual_seq_length,
+        }
+
+    def _restore_model_state(self, state: dict) -> None:
+        D = self._n_series
+        W = state["actual_seq_length"]
+        self._actual_seq_length = W
+        self._window_min = state["window_min"]
+        self._window_max = state["window_max"]
+
+        self._diffusion = DiffusionTS(
+            seq_length=W,
+            feature_size=D,
+            n_layer_enc=self.n_layers,
+            n_layer_dec=self.n_layers,
+            d_model=self.d_model,
+            timesteps=self.diffusion_steps,
+            sampling_timesteps=self.sampling_steps,
+            loss_type="l1",
+            beta_schedule="cosine",
+            n_heads=self.n_heads,
+            mlp_hidden_times=4,
+            attn_pd=0.0,
+            resid_pd=0.0,
+            kernel_size=1,
+            padding_size=0,
+        ).to(self.device)
+        self._diffusion.load_state_dict(state["diffusion"])
+
+        self._ema = EMA(
+            self._diffusion, beta=_EMA_DECAY, update_every=_EMA_UPDATE_EVERY
+        ).to(self.device)
+        self._ema.ema_model.load_state_dict(state["ema_model"])
+
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------

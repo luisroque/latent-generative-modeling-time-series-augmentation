@@ -24,6 +24,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from lgta.benchmarks import (
+    DirectTransformGenerator,
     TimeSeriesGenerator,
     get_default_benchmark_generators,
 )
@@ -65,8 +66,17 @@ class ExperimentConfig:
     lgta_latent_dim: int = 4
     lgta_equiv_weight: float = 1.0
     lgta_sample_from_posterior: bool = False
+    variant_transformations: list[str] = field(default_factory=list)
     benchmark_generators: list[TimeSeriesGenerator] = field(default_factory=list)
     output_dir: Path = Path("assets/results/downstream_forecasting")
+
+    @property
+    def effective_transformations(self) -> list[str]:
+        return self.variant_transformations if self.variant_transformations else [self.lgta_transformation]
+
+    @property
+    def n_variants(self) -> int:
+        return len(self.effective_transformations)
 
     def _cache_key_dict(self) -> dict:
         """Fields that define cache identity (excludes generators and output_dir)."""
@@ -83,6 +93,7 @@ class ExperimentConfig:
             "lgta_latent_dim": self.lgta_latent_dim,
             "lgta_equiv_weight": self.lgta_equiv_weight,
             "lgta_sample_from_posterior": self.lgta_sample_from_posterior,
+            "variant_transformations": self.variant_transformations,
             "seed": SEED,
         }
 
@@ -194,20 +205,32 @@ def _train_and_evaluate(
     epochs: int,
     batch_size: int,
     device: torch.device,
+    y_train_mask: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray]:
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.MSELoss()
-    ds = TensorDataset(
+    train_tensors = [
         torch.from_numpy(X_train).to(device),
         torch.from_numpy(y_train).to(device),
-    )
+    ]
+    if y_train_mask is not None:
+        train_tensors.append(
+            torch.from_numpy(y_train_mask.astype(np.float32)).to(device)
+        )
+    ds = TensorDataset(*train_tensors)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True)
 
     model.train()
     for _ in range(epochs):
-        for bx, by in loader:
+        for batch in loader:
+            bx, by = batch[0], batch[1]
+            bm = batch[2] if len(batch) > 2 else None
             optimizer.zero_grad()
-            criterion(model(bx), by).backward()
+            pred = model(bx)
+            if bm is not None:
+                loss = ((pred - by) ** 2 * bm).sum() / bm.sum().clamp(min=1)
+            else:
+                loss = nn.functional.mse_loss(pred, by)
+            loss.backward()
             optimizer.step()
 
     model.eval()
@@ -230,6 +253,7 @@ def _run_single(
     y_test: np.ndarray,
     scale: float,
     cfg: ExperimentConfig,
+    y_train_mask: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray]:
     device = _get_device()
     if forecaster_type == "LSTM":
@@ -246,6 +270,7 @@ def _run_single(
         cfg.forecast_epochs,
         cfg.forecast_batch_size,
         device,
+        y_train_mask,
     )
     return mase, preds, fitted
 
@@ -262,6 +287,7 @@ def _evaluate_method(
     y_train_mean: np.ndarray | None = None,
     y_train_std: np.ndarray | None = None,
     y_test_mask: np.ndarray | None = None,
+    y_train_mask: np.ndarray | None = None,
 ) -> tuple[list[ForecastResult], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Returns (results, predictions_LSTM, predictions_Linear, fitted_LSTM, fitted_Linear).
 
@@ -351,6 +377,7 @@ def _evaluate_method(
                 y_test_for_train,
                 scale,
                 cfg,
+                y_train_mask,
             )
             if forecaster_name == "LSTM":
                 preds_lstm_list.append(preds)
@@ -381,18 +408,32 @@ CACHE_ROOT = Path("assets/cache/downstream_forecasting")
 
 
 def _lgta_config_slug(cfg: ExperimentConfig) -> str:
-    """Filesystem-safe folder name from LGTA-related config (dataset, freq, window, transformation, sigma, epochs, latent_dim, equiv_weight, sample_from_posterior)."""
+    """Filesystem-safe folder name from LGTA-related config."""
     sigma_str = str(cfg.lgta_sigma).replace(".", "_")
-    parts = [
-        cfg.dataset_name,
-        cfg.freq,
-        f"w{cfg.window_size}",
-        cfg.lgta_transformation,
-        f"sig{sigma_str}",
-        f"ep{cfg.lgta_epochs}",
-        f"lat{cfg.lgta_latent_dim}",
-        f"eq{cfg.lgta_equiv_weight}",
-    ]
+    if cfg.n_variants > 1:
+        transf_str = "+".join(cfg.effective_transformations)
+        parts: list[str | float] = [
+            cfg.dataset_name,
+            cfg.freq,
+            f"w{cfg.window_size}",
+            f"{cfg.n_variants}var",
+            transf_str,
+            f"sig{sigma_str}",
+            f"ep{cfg.lgta_epochs}",
+            f"lat{cfg.lgta_latent_dim}",
+            f"eq{cfg.lgta_equiv_weight}",
+        ]
+    else:
+        parts = [
+            cfg.dataset_name,
+            cfg.freq,
+            f"w{cfg.window_size}",
+            cfg.lgta_transformation,
+            f"sig{sigma_str}",
+            f"ep{cfg.lgta_epochs}",
+            f"lat{cfg.lgta_latent_dim}",
+            f"eq{cfg.lgta_equiv_weight}",
+        ]
     if cfg.lgta_sample_from_posterior:
         parts.append("sample")
     return "_".join(str(p) for p in parts)
@@ -403,8 +444,9 @@ def _cache_dir(cfg: ExperimentConfig) -> Path:
     return CACHE_ROOT / cfg.dataset_name
 
 
-def _method_dir(cache_dir: Path, method_name: str) -> Path:
-    return cache_dir / method_name.replace(" ", "_")
+def _method_dir(cache_dir: Path, method_name: str, n_variants: int = 1) -> Path:
+    suffix = f"_{n_variants}var" if n_variants > 1 else ""
+    return cache_dir / (method_name + suffix).replace(" ", "_")
 
 
 def _lgta_method_dir(cache_dir: Path, cfg: ExperimentConfig) -> Path:
@@ -418,13 +460,23 @@ def _method_dir_for(
     """Resolve method name to cache dir; LGTA uses config-keyed subdir."""
     if method_name == "LGTA":
         return _lgta_method_dir(cache_dir, cfg)
-    return _method_dir(cache_dir, method_name)
+    if method_name == "Original":
+        return _method_dir(cache_dir, method_name, n_variants=1)
+    return _method_dir(cache_dir, method_name, n_variants=cfg.n_variants)
 
 
-def _known_cache_method_names() -> list[str]:
+def _benchmark_display_name(gen: TimeSeriesGenerator, n_variants: int) -> str:
+    """Display name for a benchmark generator, accounting for multi-variant Direct."""
+    if n_variants > 1 and isinstance(gen, DirectTransformGenerator):
+        return "Direct"
+    return gen.name
+
+
+def _known_cache_method_names(n_variants: int = 1) -> list[str]:
     """Method names we may have in cache: Original, LGTA, and default benchmark names."""
     return ["Original", "LGTA"] + [
-        g.name for g in get_default_benchmark_generators(seed=SEED)
+        _benchmark_display_name(g, n_variants)
+        for g in get_default_benchmark_generators(seed=SEED)
     ]
 
 
@@ -599,14 +651,39 @@ def _load_synthetic(method_dir: Path) -> np.ndarray:
     return np.load(method_dir / "synthetic.npy")
 
 
+def _save_synthetic_variants(method_dir: Path, variants: list[np.ndarray]) -> None:
+    method_dir.mkdir(parents=True, exist_ok=True)
+    if len(variants) == 1:
+        np.save(method_dir / "synthetic.npy", variants[0])
+    else:
+        for i, v in enumerate(variants):
+            np.save(method_dir / f"synthetic_v{i}.npy", v)
+
+
+def _has_synthetic_variants(method_dir: Path, n_variants: int) -> bool:
+    if n_variants == 1:
+        return _has_synthetic(method_dir)
+    return all(
+        (method_dir / f"synthetic_v{i}.npy").exists() for i in range(n_variants)
+    )
+
+
+def _load_synthetic_variants(method_dir: Path, n_variants: int) -> list[np.ndarray]:
+    if n_variants == 1:
+        return [_load_synthetic(method_dir)]
+    return [np.load(method_dir / f"synthetic_v{i}.npy") for i in range(n_variants)]
+
+
 def _methods_with_synthetic(
     cache_dir: Path, cfg: ExperimentConfig
 ) -> list[str]:
     """Return list of known method names that have cached synthetic data."""
     return [
         name
-        for name in _known_cache_method_names()
-        if _has_synthetic(_method_dir_for(cache_dir, name, cfg))
+        for name in _known_cache_method_names(cfg.n_variants)
+        if _has_synthetic_variants(
+            _method_dir_for(cache_dir, name, cfg), cfg.n_variants
+        )
     ]
 
 
@@ -630,7 +707,7 @@ def _plot_original_vs_generated(
     synthetics: dict[str, np.ndarray] = {}
     for name in methods:
         method_d = _method_dir_for(cache_dir, name, cfg)
-        synthetics[name] = _load_synthetic(method_d)
+        synthetics[name] = _load_synthetic_variants(method_d, cfg.n_variants)[0]
 
     n_cols = len(methods)
     fig, axes = plt.subplots(
@@ -688,18 +765,33 @@ def _plot_predictions_by_method_forecaster(
     """
     method_names = [
         name
-        for name in _known_cache_method_names()
+        for name in _known_cache_method_names(cfg.n_variants)
         if _has_predictions(_method_dir_for(cache_dir, name, cfg))
     ]
     if not method_names:
         return
-    X_orig, y_test, _, n_orig_features, _, _, _, _ = _load_shared_test_data(
+    X_orig, y_test, _, n_orig_features, _, _, _, valid_mask = _load_shared_test_data(
         cache_dir, cfg.window_size
     )
     _, y_win = _prepare_windows(X_orig, cfg.window_size)
     n_test = y_test.shape[0]
     n_train = y_win.shape[0] - n_test
-    y_train = y_win[:n_train]
+    y_train = y_win[:n_train].copy().astype(np.float64)
+
+    y_train_vmask: np.ndarray | None = None
+    y_test_vmask: np.ndarray | None = None
+    if valid_mask is not None:
+        y_train_vmask = _y_train_mask_from_valid_mask(
+            valid_mask, cfg.window_size, n_train, n_orig_features
+        )
+        y_test_vmask = _y_test_mask_from_valid_mask(
+            valid_mask, cfg.window_size, n_train, n_test, n_orig_features
+        )
+        y_train[~y_train_vmask] = np.nan
+
+    y_test_plot = y_test.copy().astype(np.float64)
+    if y_test_vmask is not None:
+        y_test_plot[~y_test_vmask] = np.nan
 
     n_series_avail = min(n_series, n_orig_features)
     rng = np.random.RandomState(seed)
@@ -722,7 +814,7 @@ def _plot_predictions_by_method_forecaster(
 
     for plot_idx, series_idx in enumerate(series_indices):
         actual_full_s = np.concatenate(
-            [y_train[:, series_idx], y_test[:, series_idx]], axis=0
+            [y_train[:, series_idx], y_test_plot[:, series_idx]], axis=0
         )
         fig, axes = plt.subplots(
             n_rows,
@@ -734,15 +826,21 @@ def _plot_predictions_by_method_forecaster(
         for row, method_name in enumerate(method_names):
             pred_lstm, pred_linear = predictions[method_name]
             f_lstm, f_linear = fitted[method_name]
-            lstm_pred_mean = pred_lstm.mean(axis=0)[:, series_idx]
-            linear_pred_mean = pred_linear.mean(axis=0)[:, series_idx]
+            lstm_pred_mean = pred_lstm.mean(axis=0)[:, series_idx].copy()
+            linear_pred_mean = pred_linear.mean(axis=0)[:, series_idx].copy()
+            if y_test_vmask is not None:
+                test_mask_s = y_test_vmask[:, series_idx]
+                lstm_pred_mean[~test_mask_s] = np.nan
+                linear_pred_mean[~test_mask_s] = np.nan
             ax_lstm = axes[row, 0]
             ax_linear = axes[row, 1]
             ax_lstm.plot(
                 t_full, actual_full_s, label="Actual", color="C0", alpha=0.9
             )
             if f_lstm is not None:
-                lstm_fit_mean = f_lstm.mean(axis=0)[:n_train, series_idx]
+                lstm_fit_mean = f_lstm.mean(axis=0)[:n_train, series_idx].copy()
+                if y_train_vmask is not None:
+                    lstm_fit_mean[~y_train_vmask[:, series_idx]] = np.nan
                 ax_lstm.plot(
                     np.arange(n_train),
                     lstm_fit_mean,
@@ -763,7 +861,9 @@ def _plot_predictions_by_method_forecaster(
                 t_full, actual_full_s, label="Actual", color="C0", alpha=0.9
             )
             if f_linear is not None:
-                linear_fit_mean = f_linear.mean(axis=0)[:n_train, series_idx]
+                linear_fit_mean = f_linear.mean(axis=0)[:n_train, series_idx].copy()
+                if y_train_vmask is not None:
+                    linear_fit_mean[~y_train_vmask[:, series_idx]] = np.nan
                 ax_linear.plot(
                     np.arange(n_train),
                     linear_fit_mean,
@@ -822,11 +922,13 @@ def _load_original_data(
 
 def _generate_lgta(
     cfg: ExperimentConfig, cache: Path
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """Train LGTA CVAE and generate one augmented dataset.
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None]:
+    """Train LGTA CVAE and generate synthetic dataset(s).
 
-    Returns (X_orig, X_lgta, valid_mask). X_orig and X_lgta have shape (n_timesteps, n_series).
-    valid_mask is (n_timesteps, n_series), True where observed, or None. Model weights under cache/model_weights.
+    Returns (X_orig, lgta_variants, valid_mask).
+    Each element of lgta_variants has shape (n_timesteps, n_series).
+    When cfg.n_variants > 1, one variant is generated per transformation in
+    cfg.effective_transformations; otherwise a single variant is produced.
     """
     from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
     from lgta.model.generate_data import generate_synthetic_data
@@ -853,27 +955,91 @@ def _generate_lgta(
     )
     _, _, z_mean, z_log_var = creator.predict(model)
     X_orig = creator.X_train_raw
+    valid_mask = getattr(creator, "valid_mask", None)
 
+    transformations = cfg.effective_transformations
     print(
-        f"  LGTA generation: transformation={cfg.lgta_transformation!r}, "
+        f"  LGTA generation: transformations={transformations!r}, "
         f"sigma={cfg.lgta_sigma} (applied in latent space)"
     )
-    rng = np.random.default_rng(SEED)
-    X_lgta = generate_synthetic_data(
-        model,
-        z_mean,
-        creator,
-        cfg.lgta_transformation,
-        [cfg.lgta_sigma],
-        latent_mode=LatentMode.TEMPORAL,
-        z_log_var=z_log_var if cfg.lgta_sample_from_posterior else None,
-        sample_from_posterior=cfg.lgta_sample_from_posterior,
-        rng=rng,
-    )
-    valid_mask = getattr(creator, "valid_mask", None)
-    if valid_mask is not None:
-        X_lgta = X_lgta * valid_mask.astype(np.float32)
-    return X_orig, X_lgta, valid_mask
+
+    lgta_variants: list[np.ndarray] = []
+    for transformation in transformations:
+        rng = np.random.default_rng(SEED)
+        X_lgta = generate_synthetic_data(
+            model,
+            z_mean,
+            creator,
+            transformation,
+            [cfg.lgta_sigma],
+            latent_mode=LatentMode.TEMPORAL,
+            z_log_var=z_log_var if cfg.lgta_sample_from_posterior else None,
+            sample_from_posterior=cfg.lgta_sample_from_posterior,
+            rng=rng,
+        )
+        if valid_mask is not None:
+            X_lgta = X_lgta * valid_mask.astype(np.float32)
+        lgta_variants.append(X_lgta)
+
+    return X_orig, lgta_variants, valid_mask
+
+
+def _weights_path(weights_dir: Path, gen: TimeSeriesGenerator) -> Path:
+    """Variant-agnostic path for a generator's trained model weights."""
+    return weights_dir / f"{gen.__class__.__name__}_weights.pt"
+
+
+def _fit_or_load(
+    gen: TimeSeriesGenerator,
+    X_orig: np.ndarray,
+    weights_dir: Path | None,
+) -> None:
+    """Load cached weights if available, otherwise fit and save."""
+    if weights_dir is not None:
+        wp = _weights_path(weights_dir, gen)
+        if gen.load_weights(wp):
+            print(f"    Loaded {gen.name} weights from cache")
+            return
+    gen.fit(X_orig)
+    if weights_dir is not None:
+        gen.save_weights(_weights_path(weights_dir, gen))
+
+
+def _generate_benchmark_variants(
+    gen: TimeSeriesGenerator,
+    X_orig: np.ndarray,
+    transformations: list[str],
+    valid_mask: np.ndarray | None,
+    weights_dir: Path | None = None,
+) -> list[np.ndarray]:
+    """Generate synthetic variants for a benchmark generator.
+
+    For DirectTransformGenerator: one variant per transformation in *transformations*.
+    For other generators: calls generate() len(transformations) times (stochastic samples).
+    Weights are loaded from / saved to *weights_dir* (variant-agnostic) so
+    that expensive training is never repeated across single- and multi-variant runs.
+    """
+    variants: list[np.ndarray] = []
+    if isinstance(gen, DirectTransformGenerator):
+        for t in transformations:
+            direct = DirectTransformGenerator(
+                transformation=t, sigma=gen.sigma, seed=gen.seed
+            )
+            _fit_or_load(direct, X_orig, weights_dir)
+            synth = direct.generate()
+            synth = np.clip(synth, a_min=0, a_max=None)
+            if valid_mask is not None:
+                synth = synth * valid_mask.astype(np.float32)
+            variants.append(synth)
+    else:
+        _fit_or_load(gen, X_orig, weights_dir)
+        for _ in transformations:
+            synth = gen.generate()
+            synth = np.clip(synth, a_min=0, a_max=None)
+            if valid_mask is not None:
+                synth = synth * valid_mask.astype(np.float32)
+            variants.append(synth)
+    return variants
 
 
 # ---------------------------------------------------------------------------
@@ -947,13 +1113,13 @@ def run_downstream_forecasting(
         print(f"  (single method: {method_canonical})")
     print("=" * 70)
 
+    lgta_variants: list[np.ndarray] | None = None
     if single and method_canonical not in ("original", "lgta"):
         print("\n[1/4] Loading data ...")
         X_orig, valid_mask = _load_original_data(cfg)
-        X_lgta = None
     else:
         print("\n[1/4] Training LGTA and generating synthetic data ...")
-        X_orig, X_lgta, valid_mask = _generate_lgta(cfg, cache)
+        X_orig, lgta_variants, valid_mask = _generate_lgta(cfg, cache)
 
     n_orig_features = X_orig.shape[1]
     X_orig_win, y_orig_win = _prepare_windows(X_orig, cfg.window_size)
@@ -1010,6 +1176,9 @@ def run_downstream_forecasting(
             y_test_mask = _y_test_mask_from_valid_mask(
                 valid_mask, cfg.window_size, n_train, y_test.shape[0], n_orig_features
             )
+            y_train_mask = _y_train_mask_from_valid_mask(
+                valid_mask, cfg.window_size, n_train, n_orig_features
+            )
             results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 "Original",
                 X_orig,
@@ -1022,11 +1191,12 @@ def run_downstream_forecasting(
                 y_mean,
                 y_std,
                 y_test_mask,
+                y_train_mask,
             )
             all_results.extend(results)
             _save_predictions(orig_dir, p_lstm, p_lin, f_lstm, f_lin)
 
-    run_lgta = (not single or method_canonical == "lgta") and X_lgta is not None
+    run_lgta = (not single or method_canonical == "lgta") and lgta_variants is not None
     if run_lgta:
         lgta_dir = _lgta_method_dir(cache, cfg)
         if _has_predictions(lgta_dir):
@@ -1052,7 +1222,10 @@ def run_downstream_forecasting(
             y_test_mask = _y_test_mask_from_valid_mask(
                 valid_mask, cfg.window_size, n_train, y_test.shape[0], n_orig_features
             )
-            X_lgta_aug = np.concatenate([X_orig, X_lgta], axis=1)
+            y_train_mask = _y_train_mask_from_valid_mask(
+                valid_mask, cfg.window_size, n_train, n_orig_features
+            )
+            X_lgta_aug = np.concatenate([X_orig] + lgta_variants, axis=1)
             results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 "LGTA",
                 X_lgta_aug,
@@ -1065,10 +1238,11 @@ def run_downstream_forecasting(
                 y_mean,
                 y_std,
                 y_test_mask,
+                y_train_mask,
             )
             all_results.extend(results)
             _save_predictions(lgta_dir, p_lstm, p_lin, f_lstm, f_lin)
-            _save_synthetic(lgta_dir, X_lgta)
+            _save_synthetic_variants(lgta_dir, lgta_variants)
 
     benchmarks_to_run = cfg.benchmark_generators
     if single and method_canonical not in ("original", "lgta"):
@@ -1090,9 +1264,13 @@ def run_downstream_forecasting(
         y_test_mask = _y_test_mask_from_valid_mask(
             valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
         )
+        y_train_mask = _y_train_mask_from_valid_mask(
+            valid_mask, cfg.window_size, n_train_win, n_orig_features
+        )
+        n_v = cfg.n_variants
         for gen in benchmarks_to_run:
-            name = gen.name
-            method_d = _method_dir(cache, name)
+            name = _benchmark_display_name(gen, n_v)
+            method_d = _method_dir(cache, name, n_v)
             if _has_predictions(method_d):
                 print(f"  {name}: loading from cache ...")
                 p_lstm, p_lin = _load_predictions(method_d)
@@ -1102,23 +1280,23 @@ def run_downstream_forecasting(
                     )
                 )
                 continue
-            X_synth: np.ndarray
-            if _has_synthetic(method_d):
+            if _has_synthetic_variants(method_d, n_v):
                 print(
                     f"  {name}: loading synthetic from cache, training forecasters ..."
                 )
-                X_synth = _load_synthetic(method_d)
+                variants = _load_synthetic_variants(method_d, n_v)
             else:
-                print(f"  Training {name} ...")
-                gen.fit(X_orig)
-                X_synth = gen.generate()
-                X_synth = np.clip(X_synth, a_min=0, a_max=None)
-                if valid_mask is not None:
-                    X_synth = X_synth * valid_mask.astype(np.float32)
-                _save_synthetic(method_d, X_synth)
+                print(f"  Generating {name} ({n_v} variant(s)) ...")
+                variants = _generate_benchmark_variants(
+                    gen, X_orig, cfg.effective_transformations, valid_mask,
+                    weights_dir=cache,
+                )
+                _save_synthetic_variants(method_d, variants)
             if valid_mask is not None:
-                X_synth = X_synth * valid_mask.astype(np.float32)
-            X_aug = np.concatenate([X_orig, X_synth], axis=1)
+                variants = [
+                    v * valid_mask.astype(np.float32) for v in variants
+                ]
+            X_aug = np.concatenate([X_orig] + variants, axis=1)
             results, p_lstm, p_lin, f_lstm, f_lin = _evaluate_method(
                 name,
                 X_aug,
@@ -1131,6 +1309,7 @@ def run_downstream_forecasting(
                 y_mean,
                 y_std,
                 y_test_mask,
+                y_train_mask,
             )
             all_results.extend(results)
             _save_predictions(method_d, p_lstm, p_lin, f_lstm, f_lin)
@@ -1164,7 +1343,7 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
         valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
     )
     all_results: list[ForecastResult] = []
-    for method_name in _known_cache_method_names():
+    for method_name in _known_cache_method_names(cfg.n_variants):
         method_dir = _method_dir_for(cache, method_name, cfg)
         if _has_predictions(method_dir):
             p_lstm, p_lin = _load_predictions(method_dir)
@@ -1298,7 +1477,20 @@ if __name__ == "__main__":
         action="store_true",
         help="Sample z from the CVAE posterior N(z_mean, z_std) before applying the transformation (increases diversity).",
     )
+    parser.add_argument(
+        "--variant-transformations",
+        nargs="+",
+        type=str,
+        default=None,
+        help=(
+            "Generate multiple synthetic variants per method (e.g. --variant-transformations jitter scaling magnitude_warp). "
+            "For LGTA and Direct each variant uses a different transformation; "
+            "for other generators each variant is a different random sample."
+        ),
+    )
     args = parser.parse_args()
+
+    variant_transformations = args.variant_transformations or []
 
     if args.all_datasets:
         for i, (dataset_name, freq) in enumerate(DEFAULT_DATASET_CONFIGS):
@@ -1310,6 +1502,7 @@ if __name__ == "__main__":
                 freq=freq,
                 output_dir=args.output_dir,
                 lgta_sample_from_posterior=args.lgta_sample_from_posterior,
+                variant_transformations=variant_transformations,
             )
             run_downstream_forecasting(
                 cfg,
@@ -1329,6 +1522,7 @@ if __name__ == "__main__":
             freq=freq,
             output_dir=args.output_dir,
             lgta_sample_from_posterior=args.lgta_sample_from_posterior,
+            variant_transformations=variant_transformations,
         )
         run_downstream_forecasting(
             cfg,

@@ -61,6 +61,19 @@ class TimeVAEGenerator(TimeSeriesGenerator):
         self.lr = lr
         self.kl_weight = kl_weight
 
+    def _model_state(self) -> dict:
+        return {
+            "enc": self._enc.state_dict(),
+            "dec": self._dec.state_dict(),
+        }
+
+    def _restore_model_state(self, state: dict) -> None:
+        T = self._n_timesteps
+        self._enc = _Encoder(T, self.hidden_dim, self.latent_dim).to(self.device)
+        self._dec = _Decoder(T, self.hidden_dim, self.latent_dim).to(self.device)
+        self._enc.load_state_dict(state["enc"])
+        self._dec.load_state_dict(state["dec"])
+
     def _fit(self, data: np.ndarray) -> None:
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)

@@ -2,9 +2,14 @@
 Abstract interface for time series generative benchmarks. Every benchmark
 generator receives a data matrix of shape (n_timesteps, n_series), learns to
 produce synthetic series, and returns a matrix of the same shape.
+
+Subclasses that hold trained model weights should override ``_model_state``
+and ``_restore_model_state`` so that ``save_weights`` / ``load_weights`` can
+persist the trained state and avoid retraining on subsequent runs.
 """
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -46,6 +51,41 @@ class TimeSeriesGenerator(ABC):
         """Return synthetic data of shape ``(n_timesteps, n_series)``."""
         data_scaled = self._generate()
         return self._scaler.inverse_transform(data_scaled)
+
+    # ------------------------------------------------------------------
+    # Weight persistence
+    # ------------------------------------------------------------------
+
+    def save_weights(self, path: Path) -> None:
+        """Persist all state needed for generate() to work without fit()."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "_n_timesteps": self._n_timesteps,
+            "_n_series": self._n_series,
+            "_scaler": self._scaler,
+        }
+        state.update(self._model_state())
+        torch.save(state, path)
+
+    def load_weights(self, path: Path) -> bool:
+        """Restore state saved by save_weights. Returns False if *path* missing."""
+        if not path.exists():
+            return False
+        state = torch.load(path, map_location=self.device, weights_only=False)
+        self._n_timesteps = state.pop("_n_timesteps")
+        self._n_series = state.pop("_n_series")
+        self._scaler = state.pop("_scaler")
+        self._restore_model_state(state)
+        return True
+
+    def _model_state(self) -> dict:
+        """Return subclass-specific state to persist. Override in subclass."""
+        return {}
+
+    def _restore_model_state(self, state: dict) -> None:
+        """Restore subclass-specific state from *state*. Override in subclass."""
+
+    # ------------------------------------------------------------------
 
     @abstractmethod
     def _fit(self, data: np.ndarray) -> None:
