@@ -43,11 +43,16 @@ run_phase() {
   shift
   echo ""
   echo "[run_all_experiments] ========== $phase_name =========="
-  conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.downstream_forecasting \
-    --output-dir "$RESULTS_DIR" \
-    --all-datasets \
-    "$@" \
-    "${EXTRA_ARGS[@]}"
+  local cmd=(
+    conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.downstream_forecasting
+    --output-dir "$RESULTS_DIR"
+    --all-datasets
+    "$@"
+  )
+  if ((${#EXTRA_ARGS[@]} > 0)); then
+    cmd+=("${EXTRA_ARGS[@]}")
+  fi
+  "${cmd[@]}"
 }
 
 EXTRA_ARGS=("$@")
