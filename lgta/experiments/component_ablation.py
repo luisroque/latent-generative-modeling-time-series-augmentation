@@ -10,6 +10,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from scipy.stats import spearmanr, wasserstein_distance
 
 from lgta.experiments.transformation_signatures import (
@@ -316,6 +317,7 @@ def run_component_ablation(
         freq=freq,
         scaler_type=scaler_type,
         weights_dir=weights_dir,
+        device=torch.device("cpu"),
     )
 
     trained_models: dict[str, tuple] = {}

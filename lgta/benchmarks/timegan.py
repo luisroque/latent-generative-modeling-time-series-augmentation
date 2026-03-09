@@ -27,7 +27,9 @@ def _minmax_scale(data: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]
     return norm_data.astype(np.float32), min_val.squeeze(0), max_val.squeeze(0)
 
 
-def _minmax_inverse(norm_data: np.ndarray, min_val: np.ndarray, max_val: np.ndarray) -> np.ndarray:
+def _minmax_inverse(
+    norm_data: np.ndarray, min_val: np.ndarray, max_val: np.ndarray
+) -> np.ndarray:
     """Inverse MinMax for denormalization."""
     return norm_data * (max_val + 1e-7) + min_val
 
@@ -202,9 +204,13 @@ class TimeGANGenerator(TimeSeriesGenerator):
 
     def _random_z(self, batch_size: int, seq_len: int, z_dim: int) -> torch.Tensor:
         """Random Z uniform in [0, 1] as in original random_generator."""
-        return torch.rand(batch_size, seq_len, z_dim, device=self.device, dtype=torch.float32)
+        return torch.rand(
+            batch_size, seq_len, z_dim, device=self.device, dtype=torch.float32
+        )
 
-    def _train_embedder(self, X: torch.Tensor, ori_time: list[int], max_seq_len: int) -> None:
+    def _train_embedder(
+        self, X: torch.Tensor, ori_time: list[int], max_seq_len: int
+    ) -> None:
         """Phase 1: embedder + recovery. E_loss0 = 10*sqrt(MSE(X, X_tilde))."""
         opt = torch.optim.Adam(
             list(self._emb.parameters()) + list(self._rec.parameters()), lr=self.lr
@@ -222,7 +228,9 @@ class TimeGANGenerator(TimeSeriesGenerator):
             e_loss0.backward()
             opt.step()
             if itt % log_every == 0 or itt == self.iterations - 1:
-                print(f"  [TimeGAN phase 1/3 embedder] iter {itt+1}/{self.iterations}  E_loss0={e_loss0.item():.4f}")
+                print(
+                    f"  [TimeGAN phase 1/3 embedder] iter {itt+1}/{self.iterations}  E_loss0={e_loss0.item():.4f}"
+                )
 
     def _train_supervisor_only(
         self, X: torch.Tensor, ori_time: list[int], max_seq_len: int, z_dim: int
@@ -242,10 +250,17 @@ class TimeGANGenerator(TimeSeriesGenerator):
             g_loss_s.backward()
             opt_sup.step()
             if itt % log_every == 0 or itt == self.iterations - 1:
-                print(f"  [TimeGAN phase 2/3 supervisor] iter {itt+1}/{self.iterations}  G_loss_S={g_loss_s.item():.4f}")
+                print(
+                    f"  [TimeGAN phase 2/3 supervisor] iter {itt+1}/{self.iterations}  G_loss_S={g_loss_s.item():.4f}"
+                )
 
     def _train_joint(
-        self, X: torch.Tensor, ori_time: list[int], max_seq_len: int, z_dim: int, no: int
+        self,
+        X: torch.Tensor,
+        ori_time: list[int],
+        max_seq_len: int,
+        z_dim: int,
+        no: int,
     ) -> None:
         """Phase 3: joint training. D_loss includes gamma*D_fake_e; G includes gamma*G_U_e, 100*sqrt(G_S), 100*G_V; E_loss = 10*sqrt(E_T0)+0.1*G_S. D only when > 0.15; G twice per step."""
         opt_gs = torch.optim.Adam(
@@ -336,7 +351,9 @@ class TimeGANGenerator(TimeSeriesGenerator):
                 d_loss_fake_e = nn.functional.binary_cross_entropy_with_logits(
                     y_fake_e, torch.zeros_like(y_fake_e)
                 )
-                check_d_loss = (d_loss_real + d_loss_fake + self.gamma * d_loss_fake_e).item()
+                check_d_loss = (
+                    d_loss_real + d_loss_fake + self.gamma * d_loss_fake_e
+                ).item()
             if check_d_loss > 0.15:
                 z = self._random_z(B, T_len, z_dim)
                 h_real = self._emb(batch)

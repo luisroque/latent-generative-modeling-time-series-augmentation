@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 from pathlib import Path
 from typing import Literal, Optional, Union
+
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from lgta.model.models import CVAE, EncoderType, LatentMode, get_CVAE
 from lgta.feature_engineering.dynamic_features import (
@@ -129,6 +130,8 @@ class CreateTransformedVersionsCVAE:
         num_variants: Variants per base series for synthetic data. Defaults to 20.
         noise_scale: Noise scale for synthetic data. Defaults to 0.1.
         amplitude: Seasonality amplitude for synthetic data. Defaults to 1.0.
+        device: Override device for model and tensors (e.g. torch.device("cpu"))
+            to avoid backend-specific bugs. If None, uses CUDA/MPS/CPU from env or auto.
     """
 
     def __init__(
@@ -147,6 +150,7 @@ class CreateTransformedVersionsCVAE:
         scaler_type: str = "standard",
         weights_suffix: str | None = None,
         weights_dir: str | Path | None = None,
+        device: Optional[torch.device] = None,
     ):
         self.dataset_name = dataset_name
         self.input_dir = input_dir
@@ -179,7 +183,7 @@ class CreateTransformedVersionsCVAE:
         self.df.index.name = "Date"
         self.preprocess_freq()
         self.input_data = None
-        self.device = _get_device()
+        self.device = device if device is not None else _get_device()
         self._create_directories()
         self._save_original_file()
 

@@ -172,7 +172,7 @@ model_weights/
 data/
 original_datasets/
 transformed_datasets/
-assets/data/
+assets/
 results/
 plots/
 logs/
