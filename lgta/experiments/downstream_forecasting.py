@@ -9,6 +9,9 @@ Downstream forecasting experiment with two evaluation modes:
 
 Compares LGTA against benchmark generators.  The "Original" baseline
 trains and tests on real data.  Select the mode with ``--eval-mode``.
+Dynamic time features can be disabled with ``--no-dynamic-features``.
+When ``--all-datasets`` is used, both with- and without-dynamic runs
+are performed unless ``--no-dynamic-features`` is explicitly passed.
 
 Can be invoked directly (python lgta/experiments/downstream_forecasting.py)
 or as a module (python -m lgta.experiments.downstream_forecasting) provided
@@ -19,8 +22,11 @@ import gc
 import json
 import re
 import sys
+import time
 from enum import Enum
 from pathlib import Path
+
+import resource
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
@@ -58,7 +64,11 @@ DEFAULT_DATASET_CONFIGS: list[tuple[str, str]] = [
     ("tourism", "Q"),
     ("wiki2", "D"),
     ("labour", "M"),
+    ("m3", "Y"),
     ("m3", "Q"),
+    ("m3", "M"),
+    ("m4", "W"),
+    ("m4", "H"),
 ]
 
 
@@ -70,6 +80,23 @@ class ForecastResult:
     forecaster: str
     mase_mean: float
     mase_std: float
+
+
+@dataclass
+class ResourceUsage:
+    """Stores wall-clock time and peak memory for one augmentation method's generation."""
+
+    method: str
+    time_seconds: float
+    memory_mb: float
+
+
+def _current_rss_mb() -> float:
+    """Return current process peak resident set size in MB (bytes on macOS, KB on Linux)."""
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return rss / (1024 * 1024)
+    return rss / 1024
 
 
 @dataclass
@@ -92,6 +119,11 @@ class ExperimentConfig:
     benchmark_generators: list[TimeSeriesGenerator] = field(default_factory=list)
     output_dir: Path = Path("assets/results/downstream_forecasting")
     eval_mode: EvalMode = EvalMode.TSTR
+    use_dynamic_features: bool = True
+
+    @property
+    def dynamic_subdir(self) -> str:
+        return "with_dynamic" if self.use_dynamic_features else "without_dynamic"
 
     @property
     def effective_transformations(self) -> list[str]:
@@ -117,6 +149,7 @@ class ExperimentConfig:
             "lgta_equiv_weight": self.lgta_equiv_weight,
             "lgta_sample_from_posterior": self.lgta_sample_from_posterior,
             "variant_transformations": self.variant_transformations,
+            "use_dynamic_features": self.use_dynamic_features,
             "seed": SEED,
         }
 
@@ -426,12 +459,14 @@ def _lgta_config_slug(cfg: ExperimentConfig) -> str:
         ]
     if cfg.lgta_sample_from_posterior:
         parts.append("sample")
+    if not cfg.use_dynamic_features:
+        parts.append("nodyn")
     return "_".join(str(p) for p in parts)
 
 
 def _cache_dir(cfg: ExperimentConfig) -> Path:
-    """Cache root per dataset so weights, test data, and predictions do not collide across datasets."""
-    return CACHE_ROOT / cfg.dataset_name
+    """Cache root per dataset+freq so weights, test data, and predictions do not collide across datasets or frequencies."""
+    return CACHE_ROOT / f"{cfg.dataset_name}_{cfg.freq}"
 
 
 def _method_dir(cache_dir: Path, method_name: str, n_variants: int = 1) -> Path:
@@ -877,6 +912,8 @@ def _generate_lgta(
     weights_suffix_parts = [f"eq{eq_str}"]
     if cfg.lgta_sample_from_posterior:
         weights_suffix_parts.append("posterior")
+    if not cfg.use_dynamic_features:
+        weights_suffix_parts.append("nodyn")
     weights_suffix = "_".join(weights_suffix_parts)
 
     creator = CreateTransformedVersionsCVAE(
@@ -885,6 +922,7 @@ def _generate_lgta(
         window_size=cfg.window_size,
         weights_suffix=weights_suffix,
         weights_dir=cache / "model_weights",
+        use_dynamic_features=cfg.use_dynamic_features,
     )
     model, _, _ = creator.fit(
         epochs=cfg.lgta_epochs,
@@ -1027,7 +1065,7 @@ def run_downstream_forecasting(
     Synthetic variants are stacked with the original training data so the
     forecaster sees both real and generated windows.
 
-    Results are written to output_dir / <eval_mode> / <lgta_config_slug>.
+    Results are written to output_dir / <eval_mode> / <dynamic_subdir> / <lgta_config_slug>.
     Prediction caches are stored per eval-mode inside each method's cache
     directory so both modes can coexist.
     """
@@ -1049,19 +1087,27 @@ def run_downstream_forecasting(
     if not cfg.benchmark_generators:
         cfg.benchmark_generators = get_default_benchmark_generators(seed=SEED)
 
+    dyn_label = "WITH" if cfg.use_dynamic_features else "WITHOUT"
     print("=" * 70)
-    print(f"DOWNSTREAM FORECASTING EXPERIMENT  [{cfg.eval_mode.value}]")
+    print(f"DOWNSTREAM FORECASTING EXPERIMENT  [{cfg.eval_mode.value}]  [{dyn_label} dynamic features]")
     if single:
         print(f"  (single method: {method_canonical})")
     print("=" * 70)
 
+    resource_usages: list[ResourceUsage] = []
     lgta_variants: list[np.ndarray] | None = None
     if single and method_canonical not in ("original", "lgta"):
         print("\n[1/4] Loading data ...")
         X_orig, valid_mask = _load_original_data(cfg)
     else:
         print("\n[1/4] Training LGTA and generating synthetic data ...")
+        t0 = time.perf_counter()
+        rss_before = _current_rss_mb()
         X_orig, lgta_variants, valid_mask = _generate_lgta(cfg, cache)
+        rss_after = _current_rss_mb()
+        resource_usages.append(
+            ResourceUsage("LGTA", time.perf_counter() - t0, max(rss_before, rss_after))
+        )
 
     n_orig_features = X_orig.shape[1]
     X_orig_win, y_orig_win = _prepare_windows(X_orig, cfg.window_size)
@@ -1240,9 +1286,19 @@ def run_downstream_forecasting(
                 variants = _load_synthetic_variants(method_d, n_v)
             else:
                 print(f"  Generating {name} ({n_v} variant(s)) ...")
+                t0 = time.perf_counter()
+                rss_before = _current_rss_mb()
                 variants = _generate_benchmark_variants(
                     gen, X_orig, cfg.effective_transformations, valid_mask,
                     weights_dir=cache,
+                )
+                rss_after = _current_rss_mb()
+                resource_usages.append(
+                    ResourceUsage(
+                        name,
+                        time.perf_counter() - t0,
+                        max(rss_before, rss_after),
+                    )
                 )
                 _save_synthetic_variants(method_d, variants)
             if valid_mask is not None:
@@ -1270,9 +1326,11 @@ def run_downstream_forecasting(
             _release_memory()
 
     _print_results(all_results)
-    effective_out = cfg.output_dir / cfg.eval_mode.value / _lgta_config_slug(cfg)
+    effective_out = cfg.output_dir / cfg.eval_mode.value / cfg.dynamic_subdir / _lgta_config_slug(cfg)
     print(f"\nResults written to: {effective_out}")
     _save_results(all_results, effective_out)
+    if resource_usages:
+        _save_resource_usage(resource_usages, effective_out)
     _plot_original_vs_generated(cache, effective_out, cfg, n_series=6, seed=SEED)
     _plot_predictions_by_method_forecaster(
         cache, effective_out, cfg, n_series=3, seed=SEED
@@ -1314,7 +1372,7 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
             "Run at least one method first."
         )
     _print_results(all_results)
-    effective_out = cfg.output_dir / cfg.eval_mode.value / _lgta_config_slug(cfg)
+    effective_out = cfg.output_dir / cfg.eval_mode.value / cfg.dynamic_subdir / _lgta_config_slug(cfg)
     print(f"\nResults written to: {effective_out}")
     _save_results(all_results, effective_out)
     _plot_original_vs_generated(cache, effective_out, cfg, n_series=6, seed=SEED)
@@ -1364,6 +1422,27 @@ def _save_results(results: list[ForecastResult], output_dir: Path) -> None:
                     "mase_std": r.mase_std,
                 }
                 for r in results
+            ],
+            indent=2,
+        )
+    )
+
+
+def _save_resource_usage(
+    resource_usages: list[ResourceUsage], output_dir: Path
+) -> None:
+    """Write resource_usage.json with time_seconds and memory_mb per method."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "resource_usage.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "method": u.method,
+                    "time_seconds": u.time_seconds,
+                    "memory_mb": u.memory_mb,
+                }
+                for u in resource_usages
             ],
             indent=2,
         )
@@ -1457,34 +1536,65 @@ def _load_results_from_dir(result_dir: Path) -> list[ForecastResult] | None:
     return None
 
 
+def _load_resource_usage_json(path: Path) -> list[ResourceUsage] | None:
+    """Load ResourceUsage list from resource_usage.json; returns None if missing or invalid."""
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text())
+        return [
+            ResourceUsage(
+                method=item["method"],
+                time_seconds=float(item["time_seconds"]),
+                memory_mb=float(item["memory_mb"]),
+            )
+            for item in raw
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
 def _has_result_file(result_dir: Path) -> bool:
     return (result_dir / "downstream_results.json").exists() or (
         result_dir / "DOWNSTREAM_RESULTS.md"
     ).exists()
 
 
+_DYNAMIC_SUBDIRS = ("with_dynamic", "without_dynamic")
+
+
 def _discover_result_dirs(
     output_dir: Path,
-) -> list[tuple[str, str, Path]]:
+) -> list[tuple[str, str, str, Path]]:
     """Find all result directories that contain downstream results.
 
-    Returns list of (eval_mode, config_slug, dir_path). Scans
-    output_dir/TSTR/<slug> and output_dir/downstream_task/<slug>, and
-    output_dir/<slug> for legacy layout. A dir is included if it has
-    downstream_results.json or DOWNSTREAM_RESULTS.md.
+    Returns list of (eval_mode, dynamic_setting, config_slug, dir_path).
+    Scans output_dir/<mode>/<dynamic_subdir>/<slug> (new layout) and
+    output_dir/<mode>/<slug> (legacy layout without dynamic subdir).
     """
-    discovered: list[tuple[str, str, Path]] = []
+    discovered: list[tuple[str, str, str, Path]] = []
     for mode in ("TSTR", "downstream_task"):
         mode_dir = output_dir / mode
         if not mode_dir.is_dir():
             continue
+        for dyn in _DYNAMIC_SUBDIRS:
+            dyn_dir = mode_dir / dyn
+            if not dyn_dir.is_dir():
+                continue
+            for slug_dir in dyn_dir.iterdir():
+                if slug_dir.is_dir() and _has_result_file(slug_dir):
+                    discovered.append((mode, dyn, slug_dir.name, slug_dir))
         for slug_dir in mode_dir.iterdir():
-            if slug_dir.is_dir() and _has_result_file(slug_dir):
-                discovered.append((mode, slug_dir.name, slug_dir))
+            if (
+                slug_dir.is_dir()
+                and slug_dir.name not in _DYNAMIC_SUBDIRS
+                and _has_result_file(slug_dir)
+            ):
+                discovered.append((mode, "with_dynamic", slug_dir.name, slug_dir))
     for slug_dir in output_dir.iterdir():
         if slug_dir.is_dir() and slug_dir.name not in ("TSTR", "downstream_task"):
             if _has_result_file(slug_dir):
-                discovered.append(("legacy", slug_dir.name, slug_dir))
+                discovered.append(("legacy", "with_dynamic", slug_dir.name, slug_dir))
     return discovered
 
 
@@ -1504,8 +1614,9 @@ def _write_combined_summary(output_dir: Path) -> None:
     """Combine all per-dataset results (TSTR and downstream_task) into one summary.
 
     Reads downstream_results.json from each discovered result dir, computes
-    % change vs Original per (dataset, eval_mode, forecaster), and writes
-    COMBINED_RESULTS.md and COMBINED_RESULTS.csv: Dataset | Method | Variants | TSTR MASE | TSTR % | downstream_task MASE | downstream_task %.
+    % change vs Original per (dataset, eval_mode, dynamic_setting, forecaster),
+    and writes COMBINED_RESULTS.md and COMBINED_RESULTS.csv with columns:
+    Dataset | Method | Variants | Dynamic | TSTR MASE | TSTR % | downstream_task MASE | downstream_task %.
     """
     discovered = _discover_result_dirs(output_dir)
     if not discovered:
@@ -1515,39 +1626,47 @@ def _write_combined_summary(output_dir: Path) -> None:
         )
         return
 
-    by_slug_mode: dict[tuple[str, str], list[ForecastResult]] = {}
-    for eval_mode, config_slug, dir_path in discovered:
-        key = (config_slug, eval_mode)
+    by_key: dict[tuple[str, str, str], list[ForecastResult]] = {}
+    for eval_mode, dyn_setting, config_slug, dir_path in discovered:
+        key = (config_slug, dyn_setting, eval_mode)
         loaded = _load_results_from_dir(dir_path)
         if loaded:
-            by_slug_mode[key] = loaded
+            by_key[key] = loaded
 
-    slugs = sorted({s for s, _ in by_slug_mode})
-    methods_per_slug: dict[str, set[str]] = {}
-    for (slug, mode), results in by_slug_mode.items():
-        methods_per_slug.setdefault(slug, set()).update(r.method for r in results)
+    slug_dyn_pairs = sorted({(s, d) for s, d, _ in by_key})
+    methods_per_pair: dict[tuple[str, str], set[str]] = {}
+    for (slug, dyn, _mode), results in by_key.items():
+        methods_per_pair.setdefault((slug, dyn), set()).update(
+            r.method for r in results
+        )
     all_methods = sorted(
-        set().union(*(methods_per_slug.get(s, set()) for s in slugs))
+        set().union(*(s for s in methods_per_pair.values())) if methods_per_pair else set()
     )
     eval_modes = ["TSTR", "downstream_task"]
-    if any(m == "legacy" for _, m, _ in discovered):
+    if any(m == "legacy" for m, _, _, _ in discovered):
         eval_modes.append("legacy")
 
-    def original_mase(slug: str, mode: str, forecaster: str) -> float | None:
-        key = (slug, mode)
-        if key not in by_slug_mode:
+    _DYN_DISPLAY = {"with_dynamic": "Yes", "without_dynamic": "No"}
+
+    def original_mase(
+        slug: str, dyn: str, mode: str, forecaster: str
+    ) -> float | None:
+        key = (slug, dyn, mode)
+        if key not in by_key:
             return None
-        for r in by_slug_mode[key]:
+        for r in by_key[key]:
             if r.method == "Original" and r.forecaster == forecaster:
                 return r.mase_mean
         return None
 
-    def mase_and_pct(slug: str, mode: str, method: str, forecaster: str) -> tuple[str, str]:
-        key = (slug, mode)
-        if key not in by_slug_mode:
+    def mase_and_pct(
+        slug: str, dyn: str, mode: str, method: str, forecaster: str
+    ) -> tuple[str, str]:
+        key = (slug, dyn, mode)
+        if key not in by_key:
             return "", ""
-        orig = original_mase(slug, mode, forecaster)
-        for r in by_slug_mode[key]:
+        orig = original_mase(slug, dyn, mode, forecaster)
+        for r in by_key[key]:
             if r.method == method and r.forecaster == forecaster:
                 mase_str = f"{r.mase_mean:.4f}"
                 if orig is not None and orig > 0:
@@ -1569,7 +1688,7 @@ def _write_combined_summary(output_dir: Path) -> None:
         "",
     ]
     csv_rows: list[list[str]] = []
-    header = ["Dataset", "Method", "Variants"]
+    header = ["Dataset", "Method", "Variants", "Dynamic"]
     for mode in eval_modes:
         header.append(f"{mode} MASE")
         header.append(f"{mode} %")
@@ -1578,13 +1697,14 @@ def _write_combined_summary(output_dir: Path) -> None:
     md_lines.append("|" + "|".join(["--------"] * len(header)) + "|")
     csv_rows.append(header)
 
-    for slug in slugs:
+    for slug, dyn in slug_dyn_pairs:
         dataset_short, variants_label = _slug_to_dataset_and_variants(slug)
+        dyn_label = _DYN_DISPLAY.get(dyn, dyn)
         for method in all_methods:
-            row_cells: list[str] = [dataset_short, method, variants_label]
+            row_cells: list[str] = [dataset_short, method, variants_label, dyn_label]
             has_any = False
             for mode in eval_modes:
-                mase_str, pct_str = mase_and_pct(slug, mode, method, "LSTM")
+                mase_str, pct_str = mase_and_pct(slug, dyn, mode, method, "LSTM")
                 row_cells.extend([mase_str, pct_str])
                 if mase_str or pct_str:
                     has_any = True
@@ -1602,6 +1722,64 @@ def _write_combined_summary(output_dir: Path) -> None:
     print(f"Combined summary written to {md_path} and {csv_path}")
 
 
+def _write_resource_usage_summary(output_dir: Path) -> None:
+    """Write RESOURCE_USAGE.md and RESOURCE_USAGE.csv from resource_usage.json in each result dir.
+
+    One row per (dataset, method, variants, dynamic) with Time (s) and Memory (MB).
+    Uses one result dir per (config_slug, dynamic) to avoid duplicate rows across eval modes.
+    """
+    discovered = _discover_result_dirs(output_dir)
+    slug_dyn_pairs = sorted({(slug, dyn) for _mode, dyn, slug, _ in discovered})
+    dir_by_slug_dyn: dict[tuple[str, str], Path] = {}
+    for _mode, dyn, slug, dir_path in discovered:
+        key = (slug, dyn)
+        if key not in dir_by_slug_dyn:
+            dir_by_slug_dyn[key] = dir_path
+
+    _DYN_DISPLAY = {"with_dynamic": "Yes", "without_dynamic": "No"}
+    header = ["Dataset", "Method", "Variants", "Dynamic", "Time (s)", "Memory (MB)"]
+    md_lines = [
+        "# Resource Usage by Dataset and Augmentation Method",
+        "",
+        "Time (s): wall-clock generation time. Memory (MB): peak RSS after generation.",
+        "",
+    ]
+    md_lines.append("| " + " | ".join(header) + " |")
+    md_lines.append("|" + "|".join(["--------"] * len(header)) + "|")
+    csv_rows: list[list[str]] = [header]
+
+    for slug, dyn in slug_dyn_pairs:
+        dir_path = dir_by_slug_dyn.get((slug, dyn))
+        if dir_path is None:
+            continue
+        usages = _load_resource_usage_json(dir_path / "resource_usage.json")
+        if not usages:
+            continue
+        dataset_short, variants_label = _slug_to_dataset_and_variants(slug)
+        dyn_label = _DYN_DISPLAY.get(dyn, dyn)
+        for u in usages:
+            row = [
+                dataset_short,
+                u.method,
+                variants_label,
+                dyn_label,
+                f"{u.time_seconds:.2f}",
+                f"{u.memory_mb:.2f}",
+            ]
+            md_lines.append("| " + " | ".join(row) + " |")
+            csv_rows.append(row)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    md_path = output_dir / "RESOURCE_USAGE.md"
+    csv_path = output_dir / "RESOURCE_USAGE.csv"
+    md_path.write_text("\n".join(md_lines) + "\n")
+    with csv_path.open("w") as f:
+        f.write(",".join(csv_rows[0]) + "\n")
+        for row in csv_rows[1:]:
+            f.write(",".join(row) + "\n")
+    print(f"Resource usage summary written to {md_path} and {csv_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1612,18 +1790,18 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="Dataset name (e.g. tourism, wiki2, labour, m3). Default: tourism.",
+        help="Dataset name (e.g. tourism, wiki2, labour, m3, m4). Default: tourism.",
     )
     parser.add_argument(
         "--freq",
         type=str,
         default=None,
-        help="Time series frequency (e.g. Q, D, M). Default: Q for tourism, D for wiki2, M for labour, Q for m3.",
+        help="Time series frequency (e.g. Y, Q, M, D, W, H). Y/Q/M for m3 and m4, W/H for m4.",
     )
     parser.add_argument(
         "--all-datasets",
         action="store_true",
-        help="Run the experiment for all supported datasets (tourism, wiki2, labour, m3) with their default frequencies.",
+        help="Run the experiment for all supported datasets (tourism, wiki2, labour, m3, m4) with their default frequencies.",
     )
     parser.add_argument(
         "--method",
@@ -1669,6 +1847,11 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--no-dynamic-features",
+        action="store_true",
+        help="Disable dynamic time features for the LGTA CVAE model.",
+    )
+    parser.add_argument(
         "--combine-only",
         action="store_true",
         help="Only write COMBINED_RESULTS.md/csv from existing downstream_results.json files (no training).",
@@ -1677,31 +1860,43 @@ if __name__ == "__main__":
 
     if args.combine_only:
         _write_combined_summary(args.output_dir)
+        _write_resource_usage_summary(args.output_dir)
         sys.exit(0)
 
     variant_transformations = args.variant_transformations or []
     eval_mode = EvalMode(args.eval_mode)
+    dynamic_settings: list[bool] = (
+        [True, False] if args.all_datasets and not args.no_dynamic_features else
+        [not args.no_dynamic_features]
+    )
 
     if args.all_datasets:
-        for i, (dataset_name, freq) in enumerate(DEFAULT_DATASET_CONFIGS):
-            _release_memory()
-            print(f"\n{'='*70}")
-            print(f"Dataset {i+1}/{len(DEFAULT_DATASET_CONFIGS)}: {dataset_name} (freq={freq})")
-            print("="*70)
-            cfg = ExperimentConfig(
-                dataset_name=dataset_name,
-                freq=freq,
-                output_dir=args.output_dir,
-                lgta_sample_from_posterior=args.lgta_sample_from_posterior,
-                variant_transformations=variant_transformations,
-                eval_mode=eval_mode,
-            )
-            run_downstream_forecasting(
-                cfg,
-                method=args.method,
-                results_only=args.results_only,
-            )
+        for use_dyn in dynamic_settings:
+            dyn_label = "WITH" if use_dyn else "WITHOUT"
+            print(f"\n{'#'*70}")
+            print(f"# Dynamic features: {dyn_label}")
+            print(f"{'#'*70}")
+            for i, (dataset_name, freq) in enumerate(DEFAULT_DATASET_CONFIGS):
+                _release_memory()
+                print(f"\n{'='*70}")
+                print(f"Dataset {i+1}/{len(DEFAULT_DATASET_CONFIGS)}: {dataset_name} (freq={freq})")
+                print("="*70)
+                cfg = ExperimentConfig(
+                    dataset_name=dataset_name,
+                    freq=freq,
+                    output_dir=args.output_dir,
+                    lgta_sample_from_posterior=args.lgta_sample_from_posterior,
+                    variant_transformations=variant_transformations,
+                    eval_mode=eval_mode,
+                    use_dynamic_features=use_dyn,
+                )
+                run_downstream_forecasting(
+                    cfg,
+                    method=args.method,
+                    results_only=args.results_only,
+                )
         _write_combined_summary(args.output_dir)
+        _write_resource_usage_summary(args.output_dir)
     else:
         dataset_name = args.dataset if args.dataset is not None else "tourism"
         freq = args.freq
@@ -1717,6 +1912,7 @@ if __name__ == "__main__":
             lgta_sample_from_posterior=args.lgta_sample_from_posterior,
             variant_transformations=variant_transformations,
             eval_mode=eval_mode,
+            use_dynamic_features=not args.no_dynamic_features,
         )
         run_downstream_forecasting(
             cfg,

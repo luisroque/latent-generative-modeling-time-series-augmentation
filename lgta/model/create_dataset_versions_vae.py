@@ -80,6 +80,32 @@ def _collate_with_optional_mask(
     return dyn, inp, mask
 
 
+def _dates_to_datetimeindex(
+    dates: list, freq: str, n: int
+) -> pd.DatetimeIndex:
+    """Convert dataset dates to DatetimeIndex. Handles integer period indices (e.g. M4 ds)."""
+    raw = np.asarray(dates[:n])
+    if raw.size == 0:
+        return pd.DatetimeIndex([])
+    if np.issubdtype(raw.dtype, np.integer) or (
+        np.issubdtype(raw.dtype, np.floating) and np.all(raw == np.round(raw))
+    ):
+        raw = np.asarray(raw, dtype=np.int64)
+        origin = pd.Timestamp("1970-01-01")
+        d = raw - raw.min()
+        if freq in ("Y", "YS"):
+            return origin + pd.to_timedelta(d * 365, unit="D")
+        if freq in ("M", "MS"):
+            return origin + pd.DateOffset(months=1) * d
+        if freq in ("W", "WS"):
+            return origin + pd.to_timedelta(d * 7, unit="D")
+        if freq in ("H",):
+            return origin + pd.to_timedelta(d, unit="h")
+        if freq in ("D",):
+            return origin + pd.to_timedelta(d, unit="D")
+    return pd.to_datetime(raw[:n])
+
+
 def _get_device() -> torch.device:
     override = os.environ.get("LGTA_DEVICE")
     if override:
@@ -151,11 +177,13 @@ class CreateTransformedVersionsCVAE:
         weights_suffix: str | None = None,
         weights_dir: str | Path | None = None,
         device: Optional[torch.device] = None,
+        use_dynamic_features: bool = True,
     ):
         self.dataset_name = dataset_name
         self.input_dir = input_dir
         self.weights_suffix = weights_suffix or ""
         self.weights_dir = Path(weights_dir) if weights_dir is not None else None
+        self.use_dynamic_features = use_dynamic_features
         self.transf_data = transf_data
         self.freq = freq
         self.test_size = test_size
@@ -178,7 +206,9 @@ class CreateTransformedVersionsCVAE:
         _mask = self.dataset["predict"].get("valid_mask")
         self.valid_mask = _mask.astype(bool) if _mask is not None else None
         self.df = pd.DataFrame(data)
-        dates_series = pd.to_datetime(self.dataset["dates"][: self.n])
+        dates_series = _dates_to_datetimeindex(
+            self.dataset["dates"], self.freq, self.n
+        )
         self.df = self.df.set_index(dates_series)
         self.df.index.name = "Date"
         self.preprocess_freq()
@@ -190,7 +220,11 @@ class CreateTransformedVersionsCVAE:
     def preprocess_freq(self):
         end_date = None
 
-        if self.freq in ["Q", "QS"]:
+        if self.freq in ["Y", "YS"]:
+            if self.freq == "Y":
+                self.freq = "YS"
+            end_date = self.df.index[-1] + pd.DateOffset(years=self.window_size)
+        elif self.freq in ["Q", "QS"]:
             if self.freq == "Q":
                 self.freq += "S"
             end_date = self.df.index[-1] + pd.DateOffset(months=self.window_size * 3)
@@ -202,9 +236,11 @@ class CreateTransformedVersionsCVAE:
             end_date = self.df.index[-1] + pd.DateOffset(weeks=self.window_size)
         elif self.freq == "D":
             end_date = self.df.index[-1] + pd.DateOffset(days=self.window_size)
+        elif self.freq == "H":
+            end_date = self.df.index[-1] + pd.Timedelta(hours=self.window_size)
         else:
             raise InvalidFrequencyError(
-                f"Invalid frequency - {self.freq}. Please use one of the defined frequencies: Q, QS, M, MS, W, or D."
+                f"Invalid frequency - {self.freq}. Use one of: Y, YS, Q, QS, M, MS, W, D, H."
             )
 
         ix = pd.date_range(
@@ -275,10 +311,14 @@ class CreateTransformedVersionsCVAE:
             self.scaler_target = MinMaxScaler().fit(self.X_train_raw)
         X_train_raw_scaled = self.scaler_target.transform(self.X_train_raw)
 
-        if n == self.n:
-            self.dynamic_features = create_dynamic_features(self.df_generate, self.freq)
+        if self.use_dynamic_features:
+            if n == self.n:
+                self.dynamic_features = create_dynamic_features(self.df_generate, self.freq)
+            else:
+                self.dynamic_features = create_dynamic_features(self.df, self.freq)
         else:
-            self.dynamic_features = create_dynamic_features(self.df, self.freq)
+            idx = self.df_generate.index if n == self.n else self.df.index
+            self.dynamic_features = pd.DataFrame(index=idx).astype(np.float32)
 
         X_train = temporalize(X_train_raw_scaled, self.window_size)
 

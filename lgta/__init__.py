@@ -4,5 +4,6 @@ __version__ = "0.5.69"
 # normalization kernel call if it happens inside a deep import chain.
 # A single eager call here triggers the lazy init safely.
 import torch as _torch
+
 _torch.nn.functional.layer_norm(_torch.randn(2, 4), [4])
 del _torch

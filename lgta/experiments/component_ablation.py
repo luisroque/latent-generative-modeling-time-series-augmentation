@@ -700,7 +700,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="Dataset name (e.g. tourism, wiki2, labour, m3). Default: tourism.",
+        help="Dataset name (e.g. tourism, wiki2, labour, m3, m4). Default: tourism.",
     )
     parser.add_argument(
         "--freq",

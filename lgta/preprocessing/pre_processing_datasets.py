@@ -1,6 +1,6 @@
 """
 Preprocessing pipeline for loading and formatting time series datasets.
-Supports TourismSmall (via datasetsforecast) and synthetic data generation.
+Supports datasetsforecast (HierarchicalData, M3, M4) and synthetic data generation.
 Converts raw data into the internal 'groups' dict consumed by the rest of the codebase.
 """
 
@@ -11,6 +11,7 @@ from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 from datasetsforecast.hierarchical import HierarchicalData
 from datasetsforecast.m3 import M3
+from datasetsforecast.m4 import M4
 
 from .utils import generate_groups_data_flat, generate_groups_data_matrix
 
@@ -19,6 +20,11 @@ M3_GROUP_BY_FREQ: dict[str, tuple[str, int, int]] = {
     "Q": ("Quarterly", 4, 8),
     "M": ("Monthly", 12, 18),
     "D": ("Other", 1, 8),
+}
+
+M4_GROUP_BY_FREQ: dict[str, tuple[str, int, int]] = {
+    "W": ("Weekly", 1, 13),
+    "H": ("Hourly", 24, 48),
 }
 
 HIERARCHICAL_DATASET_PARAMS: dict[str, tuple[int, int]] = {
@@ -41,11 +47,12 @@ class PreprocessDatasets:
         - labour: Australian monthly labour (HierarchicalData)
         - synthetic: Randomly generated time series
         - m3: M3 competition; freq selects group (Y/Q/M/D).
+        - m4: M4 competition (small groups only); freq selects group (W=Weekly, H=Hourly).
 
     Attributes
     ----------
     dataset : str
-        Dataset identifier (e.g. 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3').
+        Dataset identifier (e.g. 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3', 'm4').
     freq : str
         Frequency of the time series (e.g. 'Q', 'D').
     input_dir : str
@@ -86,7 +93,7 @@ class PreprocessDatasets:
         if method is None:
             raise ValueError(
                 f"Unknown dataset '{self.dataset}'. "
-                f"Supported: 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3'."
+                f"Supported: 'tourism', 'traffic', 'wiki2', 'labour', 'synthetic', 'm3', 'm4'."
             )
         return method()
 
@@ -176,6 +183,38 @@ class PreprocessDatasets:
         load_result = M3.load(directory=data_dir, group=group_name)
         # Use only the first return: target series (unique_id, ds, y). Second/third are
         # optional exogenous/static; concatenating them produced wrong pivot and NaNs.
+        full_df = (
+            load_result[0]
+            .drop_duplicates(subset=["unique_id", "ds"], keep="last")
+            .sort_values(["unique_id", "ds"])
+        )
+        pivot = full_df.pivot(index="ds", columns="unique_id", values="y")
+        pivot = pivot.sort_index()
+        pivot = pivot[sorted(pivot.columns)]
+        valid_mask = ~pivot.isna()
+        if self.test_size is not None:
+            pivot = pivot.iloc[:, : self.test_size]
+            valid_mask = valid_mask.iloc[:, : self.test_size]
+        bottom_ids = pivot.columns.tolist()
+        groups_names: dict[str, np.ndarray] = {}
+        groups_idx: dict[str, np.ndarray] = {}
+        series_labels = np.array(bottom_ids)
+        groups_names["Series"] = series_labels
+        groups_idx["Series"] = np.arange(len(bottom_ids))
+        groups = self._build_groups_dict(
+            pivot, groups_names, groups_idx, seasonality, h, valid_mask=valid_mask.values
+        )
+        return groups
+
+    def _m4(self) -> dict:
+        if self.freq not in M4_GROUP_BY_FREQ:
+            raise ValueError(
+                f"M4 dataset does not support freq '{self.freq}'. "
+                f"Use one of: {list(M4_GROUP_BY_FREQ.keys())} (W=Weekly, H=Hourly)."
+            )
+        group_name, seasonality, h = M4_GROUP_BY_FREQ[self.freq]
+        data_dir = str(Path(self.input_dir) / DATA_DIR)
+        load_result = M4.load(directory=data_dir, group=group_name)
         full_df = (
             load_result[0]
             .drop_duplicates(subset=["unique_id", "ds"], keep="last")

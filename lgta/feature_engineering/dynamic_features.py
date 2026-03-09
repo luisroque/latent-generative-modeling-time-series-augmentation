@@ -17,6 +17,7 @@ def create_dynamic_features(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     train_df_input = pd.DataFrame()
 
     freq_to_period = {
+        "H": ("hour", "day", "week", "month", "year"),
         "D": ("day", "week", "month", "quarter", "year"),
         "W": ("week", "month", "quarter", "year"),
         "MS": ("month", "quarter", "year"),
