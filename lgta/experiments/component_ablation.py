@@ -227,6 +227,7 @@ class ComponentAblationConfig:
     equiv_weight: float = 0.0
     encoder_type: EncoderType = EncoderType.FULL
     use_channel_attention: bool = False
+    use_dynamic_features: bool = True
     latent_dim: int = 4
     kl_weight_max: float = 0.1
     kl_anneal_epochs: int = 30
@@ -239,10 +240,11 @@ class ComponentAblationConfig:
     @property
     def model_key(self) -> str:
         ch = "_chattn" if self.use_channel_attention else ""
+        dyn = "_dyn" if self.use_dynamic_features else "_noDyn"
         return (
             f"{self.latent_mode.value}_enc{self.encoder_type.value}{ch}"
             f"_eq{self.equiv_weight}_lat{self.latent_dim}"
-            f"_kl{self.kl_weight_max}"
+            f"_kl{self.kl_weight_max}{dyn}"
         )
 
 
@@ -272,6 +274,7 @@ class ComponentAblationResult:
     equiv_weight: float
     encoder_type: EncoderType
     use_channel_attention: bool
+    use_dynamic_features: bool
     recon_mse: float
     transformation_results: dict[str, TransformationResult]
 
@@ -429,14 +432,7 @@ def run_component_ablation(
     If plot_per_sigma is True: one plot per (variant, sigma) for each sigma in
     that variant's config.sigma_values, using plot_synthetic_transformation.
     """
-    vae_creator = CreateTransformedVersionsCVAE(
-        dataset_name=dataset_name,
-        freq=freq,
-        scaler_type=scaler_type,
-        weights_dir=weights_dir,
-        device=torch.device("cpu"),
-    )
-
+    vae_creators: dict[bool, CreateTransformedVersionsCVAE] = {}
     trained_models: dict[str, tuple] = {}
     results: list[ComponentAblationResult] = []
     X_orig: np.ndarray | None = None
@@ -445,12 +441,25 @@ def run_component_ablation(
 
     for config in configs:
         if config.model_key not in trained_models:
+            use_dyn = config.use_dynamic_features
+            if use_dyn not in vae_creators:
+                vae_creators[use_dyn] = CreateTransformedVersionsCVAE(
+                    dataset_name=dataset_name,
+                    freq=freq,
+                    scaler_type=scaler_type,
+                    weights_dir=weights_dir,
+                    device=torch.device("cpu"),
+                    use_dynamic_features=use_dyn,
+                )
+            vae_creator = vae_creators[use_dyn]
+
             print(f"\n{'='*60}")
             print(f"Training: {config.name}")
             print(f"  latent_mode={config.latent_mode.value}, "
                   f"equiv={config.equiv_weight}, "
                   f"encoder={config.encoder_type.value}, "
-                  f"channel_attn={config.use_channel_attention}")
+                  f"channel_attn={config.use_channel_attention}, "
+                  f"dynamic={config.use_dynamic_features}")
             print(f"{'='*60}")
 
             model, _, _ = vae_creator.fit(
@@ -472,9 +481,9 @@ def run_component_ablation(
                 model, detemporalize_method="mean",
             )
             recon_mse = float(np.mean((X_orig - X_recon) ** 2))
-            trained_models[config.model_key] = (model, z_mean, recon_mse)
+            trained_models[config.model_key] = (model, z_mean, recon_mse, vae_creator)
 
-        model, z_mean, recon_mse = trained_models[config.model_key]
+        model, z_mean, recon_mse, vae_creator = trained_models[config.model_key]
 
         transf_results: dict[str, TransformationResult] = {}
         for transf in ALL_TRANSFORMATIONS:
@@ -518,6 +527,7 @@ def run_component_ablation(
             equiv_weight=config.equiv_weight,
             encoder_type=config.encoder_type,
             use_channel_attention=config.use_channel_attention,
+            use_dynamic_features=config.use_dynamic_features,
             recon_mse=recon_mse,
             transformation_results=transf_results,
         ))
@@ -564,12 +574,12 @@ def run_component_ablation(
         for transformation in ALL_TRANSFORMATIONS:
             accumulated_synthetics = []
             for config in configs:
-                model, z_mean, _ = trained_models[config.model_key]
+                model, z_mean, _, vae_creator_cfg = trained_models[config.model_key]
                 for sigma in sigma_values:
                     X_synthetic = generate_synthetic_data(
                         model,
                         z_mean,
-                        vae_creator,
+                        vae_creator_cfg,
                         transformation,
                         [sigma],
                         latent_mode=config.latent_mode,
@@ -796,7 +806,7 @@ def print_component_ablation_report(
     print("=" * 100)
 
     header = (
-        f"{'Variant':<28s}  {'Latent':<9s}  {'Equiv':<6s}  "
+        f"{'Variant':<28s}  {'Latent':<9s}  {'Equiv':<6s}  {'Dyn':<4s}  "
         f"{'ReconMSE':>9s}  {'MeanRho':>8s}  {'Mono%':>6s}  "
         f"{'MeanFPDist':>10s}"
     )
@@ -808,10 +818,11 @@ def print_component_ablation_report(
         monos = [tr.is_monotonic for tr in r.transformation_results.values()]
         fp_dists = [tr.fingerprint_distance for tr in r.transformation_results.values()]
         mono_pct = np.mean(monos) * 100.0
+        dyn_str = "Y" if r.use_dynamic_features else "N"
 
         print(
             f"{r.name:<28s}  {r.latent_mode.value:<9s}  "
-            f"{r.equiv_weight:<6.1f}  {r.recon_mse:9.4f}  "
+            f"{r.equiv_weight:<6.1f}  {dyn_str:<4s}  {r.recon_mse:9.4f}  "
             f"{np.mean(rhos):8.4f}  {mono_pct:5.1f}%  "
             f"{np.mean(fp_dists):10.4f}"
         )
@@ -876,6 +887,12 @@ STANDARD_CONFIGS: list[ComponentAblationConfig] = [
         latent_mode=LatentMode.TEMPORAL,
         equiv_weight=0.0,
         use_channel_attention=True,
+    ),
+    ComponentAblationConfig(
+        name="G: Full L-GTA, no dynamic",
+        latent_mode=LatentMode.TEMPORAL,
+        equiv_weight=1.0,
+        use_dynamic_features=False,
     ),
 ]
 
