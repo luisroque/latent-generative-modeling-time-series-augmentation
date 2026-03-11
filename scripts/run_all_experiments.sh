@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run all downstream forecasting experiments: all datasets, single-var and 3var,
-# for both TSTR and downstream_task, with and without dynamic features.
-# Then writes COMBINED_RESULTS. Afterwards runs the component ablation study
-# for all supported datasets.
+# Run all downstream forecasting experiments: all datasets (or selected ones),
+# single-var and 3var, for both TSTR and downstream_task, with and without
+# dynamic features. Then writes COMBINED_RESULTS. Afterwards runs the component
+# ablation study for the same dataset set.
 #
 # Usage:
 #   bash scripts/run_all_experiments.sh
 #   bash scripts/run_all_experiments.sh --method lgta
+#   bash scripts/run_all_experiments.sh --datasets tourism
+#   bash scripts/run_all_experiments.sh --datasets tourism wiki2
 #
-# Optional: pass extra args (e.g. --method lgta) and they are forwarded to
-# each experiment invocation.
+# Optional: --datasets D1 [D2 ...] runs only for those datasets (e.g. tourism, wiki2).
+# Optional: other args (e.g. --method lgta) are forwarded to each experiment invocation.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAIN_ENV="lgta"
@@ -41,26 +43,56 @@ ensure_lgta_env() {
 ensure_lgta_env
 mkdir -p "$LOG_DIR"
 
+DATASETS=()
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--datasets" ]]; then
+    shift
+    while [[ $# -gt 0 && "$1" != --* ]]; do
+      DATASETS+=("$1")
+      shift
+    done
+  else
+    EXTRA_ARGS+=("$1")
+    shift
+  fi
+done
+
 run_phase() {
   local phase_name="$1"
   shift
+  local phase_args=("$@")
   echo ""
   echo "[run_all_experiments] ========== $phase_name =========="
-  local cmd=(
-    conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.downstream_forecasting
-    --output-dir "$RESULTS_DIR"
-    --all-datasets
-    "$@"
-  )
-  if ((${#EXTRA_ARGS[@]} > 0)); then
-    cmd+=("${EXTRA_ARGS[@]}")
+  if ((${#DATASETS[@]} > 0)); then
+    for d in "${DATASETS[@]}"; do
+      local cmd=(
+        conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.downstream_forecasting
+        --output-dir "$RESULTS_DIR"
+        --dataset "$d"
+        "${phase_args[@]}"
+      )
+      if ((${#EXTRA_ARGS[@]} > 0)); then
+        cmd+=("${EXTRA_ARGS[@]}")
+      fi
+      "${cmd[@]}"
+    done
+  else
+    local cmd=(
+      conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.downstream_forecasting
+      --output-dir "$RESULTS_DIR"
+      --all-datasets
+      "${phase_args[@]}"
+    )
+    if ((${#EXTRA_ARGS[@]} > 0)); then
+      cmd+=("${EXTRA_ARGS[@]}")
+    fi
+    "${cmd[@]}"
   fi
-  "${cmd[@]}"
 }
 
-EXTRA_ARGS=("$@")
-
 echo "[run_all_experiments] Root: $ROOT_DIR | Downstream: $RESULTS_DIR | Ablation: $COMPONENT_ABLATION_DIR | Log: $LOG_DIR/run_all_experiments_$TS.log"
+echo "[run_all_experiments] Datasets: ${DATASETS[*]:-(all)}"
 echo "[run_all_experiments] Extra args: ${EXTRA_ARGS[*]:-(none)}"
 
 {
@@ -82,15 +114,29 @@ echo "[run_all_experiments] Extra args: ${EXTRA_ARGS[*]:-(none)}"
 
   echo ""
   echo "[run_all_experiments] ========== Component ablation =========="
-  run_component_ablation_cmd=(
-    conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.component_ablation
-    --output-dir "$COMPONENT_ABLATION_DIR"
-    --all-datasets
-  )
-  if ((${#EXTRA_ARGS[@]} > 0)); then
-    run_component_ablation_cmd+=("${EXTRA_ARGS[@]}")
+  if ((${#DATASETS[@]} > 0)); then
+    for d in "${DATASETS[@]}"; do
+      run_component_ablation_cmd=(
+        conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.component_ablation
+        --output-dir "$COMPONENT_ABLATION_DIR"
+        --dataset "$d"
+      )
+      if ((${#EXTRA_ARGS[@]} > 0)); then
+        run_component_ablation_cmd+=("${EXTRA_ARGS[@]}")
+      fi
+      "${run_component_ablation_cmd[@]}"
+    done
+  else
+    run_component_ablation_cmd=(
+      conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.component_ablation
+      --output-dir "$COMPONENT_ABLATION_DIR"
+      --all-datasets
+    )
+    if ((${#EXTRA_ARGS[@]} > 0)); then
+      run_component_ablation_cmd+=("${EXTRA_ARGS[@]}")
+    fi
+    "${run_component_ablation_cmd[@]}"
   fi
-  "${run_component_ablation_cmd[@]}"
 } 2>&1 | tee "$LOG_DIR/run_all_experiments_$TS.log"
 
 echo "[run_all_experiments] Done. Downstream results: $RESULTS_DIR (COMBINED_RESULTS.md / COMBINED_RESULTS.csv)"
