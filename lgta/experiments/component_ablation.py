@@ -53,8 +53,10 @@ def _plot_original_vs_synthetic_ablation(
     n_series: int = 6,
     seed: int = 42,
     sigma_label: str | None = None,
+    valid_mask: np.ndarray | None = None,
 ) -> None:
-    """Plot original vs synthetic for one ablation variant (one column, n_series rows)."""
+    """Plot original vs synthetic for one ablation variant (one column, n_series rows).
+    If valid_mask is set, only observed positions are shown; missing regions are masked (gaps in lines)."""
     n_timesteps, n_total_series = X_orig.shape
     n_plot = min(n_series, n_total_series)
     rng = np.random.default_rng(seed)
@@ -67,14 +69,16 @@ def _plot_original_vs_synthetic_ablation(
     )
     for row, series_idx in enumerate(series_indices):
         ax = axes[row, 0]
-        ax.plot(t, X_orig[:, series_idx], label="Original", color="C0", alpha=0.9)
-        ax.plot(
-            t,
-            X_synthetic[:, series_idx],
-            label="Generated",
-            color="C1",
-            alpha=0.9,
-        )
+        y_orig = X_orig[:, series_idx].astype(float)
+        y_syn = X_synthetic[:, series_idx].astype(float)
+        if valid_mask is not None:
+            inv = ~np.asarray(valid_mask[:, series_idx], dtype=bool)
+            y_orig = y_orig.copy()
+            y_syn = y_syn.copy()
+            y_orig[inv] = np.nan
+            y_syn[inv] = np.nan
+        ax.plot(t, y_orig, label="Original", color="C0", alpha=0.9)
+        ax.plot(t, y_syn, label="Generated", color="C1", alpha=0.9)
         ax.set_ylabel(f"Series {series_idx}")
         ax.legend(loc="upper right", fontsize=7)
     axes[-1, 0].set_xlabel("Time")
@@ -97,8 +101,10 @@ def _plot_merged_original_vs_synthetic(
     series_indices: np.ndarray,
     output_dir: Path,
     transformation: str | None = None,
+    valid_mask: np.ndarray | None = None,
 ) -> None:
-    """One figure per series: rows=variants, cols=sigmas; each cell original vs generated."""
+    """One figure per series: rows=variants, cols=sigmas; each cell original vs generated.
+    If valid_mask is set, only observed positions are shown; missing regions are masked."""
     lookup: dict[tuple[str, float], np.ndarray] = {
         (name, sigma): X for name, sigma, X in accumulated
     }
@@ -115,6 +121,13 @@ def _plot_merged_original_vs_synthetic(
             sharex=True,
             squeeze=False,
         )
+        y_orig = X_orig[:, series_idx].astype(float)
+        if valid_mask is not None:
+            inv = ~np.asarray(valid_mask[:, series_idx], dtype=bool)
+            y_orig_plot = y_orig.copy()
+            y_orig_plot[inv] = np.nan
+        else:
+            y_orig_plot = y_orig
         for i_var, name in enumerate(variant_names):
             for i_sigma, sigma in enumerate(sigma_values):
                 ax = axes[i_var, i_sigma]
@@ -122,14 +135,11 @@ def _plot_merged_original_vs_synthetic(
                 if key not in lookup:
                     continue
                 X_syn = lookup[key]
-                ax.plot(t, X_orig[:, series_idx], label="Original", color="C0", alpha=0.9)
-                ax.plot(
-                    t,
-                    X_syn[:, series_idx],
-                    label="Generated",
-                    color="C1",
-                    alpha=0.9,
-                )
+                y_syn = X_syn[:, series_idx].astype(float).copy()
+                if valid_mask is not None:
+                    y_syn[inv] = np.nan
+                ax.plot(t, y_orig_plot, label="Original", color="C0", alpha=0.9)
+                ax.plot(t, y_syn, label="Generated", color="C1", alpha=0.9)
                 if i_var == 0:
                     ax.set_title(f"σ={sigma}", fontsize=9)
                 if i_sigma == 0:
@@ -195,6 +205,9 @@ class TransformationResult:
     fingerprint: TransformationFingerprint
     direct_fingerprint: TransformationFingerprint
     fingerprint_distance: float
+    direct_spearman_rho: float
+    direct_is_monotonic: bool
+    direct_mse: float
 
 
 @dataclass
@@ -213,7 +226,14 @@ def _fingerprint_distance(
     lgta: TransformationFingerprint,
     direct: TransformationFingerprint,
 ) -> float:
-    """Euclidean distance between LGTA and direct fingerprint vectors."""
+    """Euclidean distance between LGTA and direct fingerprint vectors.
+
+    Fingerprints have three components (see transformation_signatures.TransformationFingerprint):
+    - autocorrelation: lag-1 autocorrelation of residuals (smooth vs i.i.d. transforms).
+    - linearity: R² of residuals vs time (trend vs non-trend).
+    - amplitude_dependence: |residuals| vs |original| (multiplicative vs additive).
+    Small distance means LGTA output matches the transformation character of direct augmentation.
+    """
     v_lgta = np.array([
         lgta.autocorrelation, lgta.linearity, lgta.amplitude_dependence,
     ])
@@ -223,12 +243,24 @@ def _fingerprint_distance(
     return float(np.linalg.norm(v_lgta - v_direct))
 
 
-def _compute_wasserstein(X_ref: np.ndarray, X_aug: np.ndarray) -> float:
-    distances = [
-        wasserstein_distance(X_ref[:, i], X_aug[:, i])
-        for i in range(X_ref.shape[1])
-    ]
-    return float(np.mean(distances))
+def _compute_wasserstein(
+    X_ref: np.ndarray,
+    X_aug: np.ndarray,
+    valid_mask: np.ndarray | None = None,
+) -> float:
+    """Mean Wasserstein distance per series. If valid_mask is set, only observed positions are used."""
+    distances: list[float] = []
+    for i in range(X_ref.shape[1]):
+        a = X_ref[:, i]
+        b = X_aug[:, i]
+        if valid_mask is not None:
+            valid = np.asarray(valid_mask[:, i], dtype=bool)
+            if np.sum(valid) == 0:
+                continue
+            a = a[valid]
+            b = b[valid]
+        distances.append(float(wasserstein_distance(a, b)))
+    return float(np.mean(distances)) if distances else 0.0
 
 
 def _evaluate_transformation(
@@ -238,10 +270,18 @@ def _evaluate_transformation(
     X_orig: np.ndarray,
     vae_creator: CreateTransformedVersionsCVAE,
     transformation: str,
+    valid_mask: np.ndarray | None = None,
 ) -> TransformationResult:
-    """Sweep sigma for one transformation, compute controllability + fingerprint."""
+    """Sweep sigma for one transformation, compute controllability + fingerprint.
+
+    Sigma usage: Mean rho and Monotonic % use all config.sigma_values (sweep).
+    Fingerprint, fingerprint_distance, and direct_mse use only the last sigma
+    (max value in the sweep), since we keep a single LGTA/direct output per transformation.
+    If valid_mask is set, comparisons use only observed positions.
+    """
     n_sigma = len(config.sigma_values)
     lgta_dists = np.zeros((n_sigma, config.n_repetitions))
+    direct_dists = np.zeros((n_sigma, config.n_repetitions))
 
     last_X_lgta: np.ndarray | None = None
     last_X_direct: np.ndarray | None = None
@@ -261,7 +301,12 @@ def _evaluate_transformation(
             ).apply_transf()
             X_direct = vae_creator.scaler_target.inverse_transform(X_direct_scaled)
 
-            lgta_dists[i, rep] = _compute_wasserstein(X_orig, X_lgta)
+            lgta_dists[i, rep] = _compute_wasserstein(
+                X_orig, X_lgta, valid_mask=valid_mask
+            )
+            direct_dists[i, rep] = _compute_wasserstein(
+                X_orig, X_direct, valid_mask=valid_mask
+            )
 
             if i == n_sigma - 1 and rep == config.n_repetitions - 1:
                 last_X_lgta = X_lgta
@@ -273,10 +318,22 @@ def _evaluate_transformation(
         lgta_means[j] <= lgta_means[j + 1] for j in range(len(lgta_means) - 1)
     )
 
+    direct_means = direct_dists.mean(axis=1)
+    direct_rho, _ = spearmanr(config.sigma_values, direct_means)
+    direct_mono = all(
+        direct_means[j] <= direct_means[j + 1]
+        for j in range(len(direct_means) - 1)
+    )
+
     assert last_X_lgta is not None and last_X_direct is not None
-    lgta_fp = compute_fingerprint(X_orig, last_X_lgta)
-    direct_fp = compute_fingerprint(X_orig, last_X_direct)
+    lgta_fp = compute_fingerprint(X_orig, last_X_lgta, valid_mask=valid_mask)
+    direct_fp = compute_fingerprint(X_orig, last_X_direct, valid_mask=valid_mask)
     fp_dist = _fingerprint_distance(lgta_fp, direct_fp)
+
+    residual_direct = last_X_direct - X_orig
+    if valid_mask is not None:
+        residual_direct = residual_direct[np.asarray(valid_mask, dtype=bool)]
+    direct_mse = float(np.mean(residual_direct ** 2))
 
     return TransformationResult(
         transformation=transformation,
@@ -287,6 +344,9 @@ def _evaluate_transformation(
         fingerprint=lgta_fp,
         direct_fingerprint=direct_fp,
         fingerprint_distance=fp_dist,
+        direct_spearman_rho=float(direct_rho) if not np.isnan(direct_rho) else 0.0,
+        direct_is_monotonic=direct_mono,
+        direct_mse=direct_mse,
     )
 
 
@@ -323,6 +383,7 @@ def run_component_ablation(
     trained_models: dict[str, tuple] = {}
     results: list[ComponentAblationResult] = []
     X_orig: np.ndarray | None = None
+    valid_mask: np.ndarray | None = None
 
     for config in configs:
         if config.model_key not in trained_models:
@@ -345,6 +406,7 @@ def run_component_ablation(
             )
             if X_orig is None:
                 X_orig = vae_creator.X_train_raw
+                valid_mask = getattr(vae_creator, "valid_mask", None)
             X_recon, _, z_mean, _ = vae_creator.predict(
                 model, detemporalize_method="mean",
             )
@@ -358,6 +420,7 @@ def run_component_ablation(
             print(f"\n  Evaluating {config.name} / {transf}...")
             transf_results[transf] = _evaluate_transformation(
                 config, model, z_mean, X_orig, vae_creator, transf,
+                valid_mask=valid_mask,
             )
             tr = transf_results[transf]
             print(f"    rho={tr.spearman_rho:.3f}  "
@@ -396,6 +459,7 @@ def run_component_ablation(
                     out_path,
                     n_series=plot_n_series,
                     seed=plot_seed,
+                    valid_mask=valid_mask,
                 )
 
     if (
@@ -436,6 +500,7 @@ def run_component_ablation(
                 series_indices,
                 plots_output_dir,
                 transformation=transformation,
+                valid_mask=valid_mask,
             )
 
     return results
@@ -453,7 +518,7 @@ def plot_component_ablation(
     _plot_monotonic_response_grid(results, sigma_values, output_dir)
     _plot_signature_comparison(results, output_dir)
     _plot_recon_vs_controllability(results, output_dir)
-    _plot_summary_heatmap(results, output_dir)
+    _plot_summary_heatmap(results, sigma_values, output_dir)
 
 
 def _plot_monotonic_response_grid(
@@ -563,39 +628,72 @@ def _plot_recon_vs_controllability(
 
 def _plot_summary_heatmap(
     results: list[ComponentAblationResult],
+    sigma_values: list[float],
     output_dir: Path,
 ) -> None:
     variant_names = [r.name for r in results]
     metric_names = [
-        "Mean rho", "Monotonic %", "Recon MSE", "Mean FP dist",
+        "Mean rho", "Direct rho", "Monotonic %", "Direct Mono %",
+        "Recon MSE", "Mean FP dist",
     ]
+    n_variants = len(results)
+    n_metrics = len(metric_names)
 
-    data = np.zeros((len(results), len(metric_names)))
+    direct_rho_mean = np.mean([
+        tr.direct_spearman_rho for tr in results[0].transformation_results.values()
+    ])
+    direct_mono_mean = np.mean([
+        tr.direct_is_monotonic for tr in results[0].transformation_results.values()
+    ]) * 100.0
+    direct_mse_mean = np.mean([
+        tr.direct_mse for tr in results[0].transformation_results.values()
+    ])
+
+    n_rows = n_variants + 1
+    data = np.zeros((n_rows, n_metrics))
+
     for i, r in enumerate(results):
         rhos = [tr.spearman_rho for tr in r.transformation_results.values()]
         monos = [tr.is_monotonic for tr in r.transformation_results.values()]
         fp_dists = [tr.fingerprint_distance for tr in r.transformation_results.values()]
         data[i, 0] = np.mean(rhos)
-        data[i, 1] = np.mean(monos) * 100.0
-        data[i, 2] = r.recon_mse
-        data[i, 3] = np.mean(fp_dists)
+        data[i, 1] = direct_rho_mean
+        data[i, 2] = np.mean(monos) * 100.0
+        data[i, 3] = direct_mono_mean
+        data[i, 4] = r.recon_mse
+        data[i, 5] = np.mean(fp_dists)
 
-    fig, ax = plt.subplots(figsize=(8, max(3, len(results) * 0.8 + 1)))
-    im = ax.imshow(data, aspect="auto", cmap="RdYlGn_r")
+    data[n_variants, 0] = direct_rho_mean
+    data[n_variants, 1] = direct_rho_mean
+    data[n_variants, 2] = direct_mono_mean
+    data[n_variants, 3] = direct_mono_mean
+    data[n_variants, 4] = direct_mse_mean
+    data[n_variants, 5] = 0.0
 
-    ax.set_xticks(range(len(metric_names)))
+    variant_names = list(variant_names) + ["Direct (baseline)"]
+    plot_data = data
+
+    fig, ax = plt.subplots(figsize=(10, max(3, n_rows * 0.8 + 1)))
+    im = ax.imshow(plot_data, aspect="auto", cmap="RdYlGn_r")
+
+    ax.set_xticks(range(n_metrics))
     ax.set_xticklabels(metric_names, fontsize=10)
-    ax.set_yticks(range(len(variant_names)))
+    ax.set_yticks(range(n_rows))
     ax.set_yticklabels(variant_names, fontsize=10)
 
-    for i in range(data.shape[0]):
-        for j in range(data.shape[1]):
-            fmt = ".1f" if j == 1 else ".3f"
+    for i in range(n_rows):
+        for j in range(n_metrics):
+            fmt = ".1f" if j in (2, 3) else ".3f"
             ax.text(j, i, f"{data[i, j]:{fmt}}", ha="center", va="center",
                     fontsize=9, color="black")
 
     fig.colorbar(im, ax=ax, shrink=0.8)
-    ax.set_title("Component Ablation Summary", fontsize=14, fontweight="bold")
+    sigma_str = ", ".join(str(s) for s in sigma_values)
+    ax.set_title(
+        f"Component Ablation Summary (σ ∈ {{{sigma_str}}})",
+        fontsize=14,
+        fontweight="bold",
+    )
     plt.tight_layout()
     out = output_dir / "summary_heatmap.png"
     plt.savefig(out, dpi=300, bbox_inches="tight")

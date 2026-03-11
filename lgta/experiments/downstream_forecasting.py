@@ -67,8 +67,8 @@ DEFAULT_DATASET_CONFIGS: list[tuple[str, str]] = [
     ("m3", "Y"),
     ("m3", "Q"),
     ("m3", "M"),
-    ("m4", "W"),
-    ("m4", "H"),
+    # ("m4", "W"),
+    # ("m4", "H"),
 ]
 
 

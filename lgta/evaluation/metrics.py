@@ -221,3 +221,20 @@ class MetricsAggregator:
             results[method]["data_quality"] = self.data_quality.compute(X_orig, X_aug)
 
         return results
+
+    def compute_metrics_single(
+        self,
+        X_orig: np.ndarray,
+        X_synthetic: np.ndarray,
+    ) -> Dict[str, Dict[str, float]]:
+        """Compute fidelity, diversity, privacy, and data_quality for one (X_orig, X_synthetic) pair.
+
+        Returns the same nested structure as one method entry from compute_all_metrics,
+        so callers can aggregate over multiple methods by calling this in a loop.
+        """
+        return {
+            "fidelity": self.fidelity.compute(X_orig, X_synthetic),
+            "diversity": self.diversity.compute(X_orig, X_synthetic),
+            "privacy": self.privacy.compute(X_orig, X_synthetic),
+            "data_quality": self.data_quality.compute(X_orig, X_synthetic),
+        }
