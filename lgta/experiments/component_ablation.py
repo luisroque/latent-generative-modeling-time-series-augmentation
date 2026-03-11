@@ -20,10 +20,24 @@ from lgta.experiments.transformation_signatures import (
     TransformationFingerprint,
     compute_fingerprint,
 )
+from lgta.benchmarks import get_default_benchmark_generators
+from lgta.benchmarks.base import TimeSeriesGenerator
+from lgta.benchmarks.direct import DirectTransformGenerator
+from lgta.evaluation.metrics import MetricsAggregator
 from lgta.model.create_dataset_versions_vae import CreateTransformedVersionsCVAE
 from lgta.model.generate_data import generate_synthetic_data
 from lgta.model.models import EncoderType, LatentMode
 from lgta.transformations.manipulate_data import ManipulateData
+
+FREQ_TO_SAMPLING_FREQ: dict[str, int] = {
+    "Y": 1,
+    "A": 1,
+    "Q": 4,
+    "M": 12,
+    "W": 52,
+    "D": 365,
+    "H": 8760,
+}
 
 DEFAULT_ABLATION_DATASETS: list[tuple[str, str]] = [
     ("tourism", "Q"),
@@ -32,6 +46,8 @@ DEFAULT_ABLATION_DATASETS: list[tuple[str, str]] = [
     ("m3", "Y"),
     ("m3", "M"),
 ]
+
+ABLATION_SIGMA_VALUES: list[float] = [0.5, 1.0, 2.0]
 
 CACHE_ABLATION_ROOT = Path("assets/cache/component_ablation")
 
@@ -234,7 +250,7 @@ class ComponentAblationConfig:
     kl_anneal_epochs: int = 30
     epochs: int = 1000
     sigma_values: list[float] = field(
-        default_factory=lambda: [0.1, 0.5, 1.0, 2.0, 5.0]
+        default_factory=lambda: list(ABLATION_SIGMA_VALUES)
     )
     n_repetitions: int = 5
 
@@ -278,6 +294,16 @@ class ComponentAblationResult:
     use_dynamic_features: bool
     recon_mse: float
     transformation_results: dict[str, TransformationResult]
+
+
+@dataclass
+class AblationRunResult:
+    """Result of run_component_ablation: results plus data needed for comparison report."""
+
+    results: list[ComponentAblationResult]
+    X_orig: np.ndarray
+    valid_mask: np.ndarray | None
+    trained_models: dict[str, tuple]
 
 
 def _fingerprint_distance(
@@ -421,7 +447,7 @@ def run_component_ablation(
     plot_seed: int = 42,
     plot_per_sigma: bool = False,
     use_cache: bool = True,
-) -> list[ComponentAblationResult]:
+) -> AblationRunResult:
     """Train each variant and evaluate across all transformations.
 
     Models are saved under weights_dir with a unique suffix per config (model_key)
@@ -600,7 +626,348 @@ def run_component_ablation(
                 valid_mask=valid_mask,
             )
 
-    return results
+    assert X_orig is not None
+    return AblationRunResult(
+        results=results,
+        X_orig=X_orig,
+        valid_mask=valid_mask,
+        trained_models=trained_models,
+    )
+
+
+def write_ablation_table_md(
+    results: list[ComponentAblationResult],
+    sigma_values: list[float],
+    output_dir: Path,
+) -> None:
+    """Write ablation_results.md with a table of all L-GTA variants (no benchmarks)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sigma_str = ", ".join(str(s) for s in sigma_values)
+    lines = [
+        "# Component Ablation Results (L-GTA variants)",
+        "",
+        f"σ ∈ {{{sigma_str}}}.",
+        "",
+        "| Variant | Mean ρ | Monotonic % | Recon MSE | Mean FP dist |",
+        "|----------|--------|-------------|-----------|--------------|",
+    ]
+    for r in results:
+        rhos = [tr.spearman_rho for tr in r.transformation_results.values()]
+        monos = [tr.is_monotonic for tr in r.transformation_results.values()]
+        fp_dists = [tr.fingerprint_distance for tr in r.transformation_results.values()]
+        mean_rho = float(np.mean(rhos))
+        mono_pct = float(np.mean(monos)) * 100.0
+        mean_fp = float(np.mean(fp_dists))
+        lines.append(
+            f"| {r.name} | {mean_rho:.4f} | {mono_pct:.1f}% | {r.recon_mse:.4f} | {mean_fp:.4f} |"
+        )
+    out = output_dir / "ablation_results.md"
+    out.write_text("\n".join(lines) + "\n")
+    print(f"Saved: {out}")
+
+
+FULL_LGTA_CONFIG_NAME = "D: Full L-GTA"
+COMPARISON_SIGMA = 2.0
+BENCHMARK_SEED = 42
+
+# 3var: same as downstream_forecasting with --variant-transformations jitter scaling magnitude_warp.
+# One variant per transformation for L-GTA and Direct; 3 samples for other benchmarks.
+COMPARISON_N_VARIANTS = 3
+COMPARISON_VARIANT_TRANSFORMATIONS: list[str] = [
+    "jitter",
+    "scaling",
+    "magnitude_warp",
+]
+
+# Reuse benchmark weights from downstream_forecasting when present (same path convention).
+DOWNSTREAM_CACHE_ROOT = Path("assets/cache/downstream_forecasting")
+DOWNSTREAM_LGTA_WEIGHTS_SUFFIX = "eq1_0_nodyn"
+DOWNSTREAM_LGTA_WINDOW_SIZE = 10
+DOWNSTREAM_LGTA_LATENT_DIM = 4
+
+
+def _flatten_metrics(metrics: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Flatten nested {category: {k: v}} to {category.k: v} for table columns."""
+    out: dict[str, float] = {}
+    for cat, vals in metrics.items():
+        for k, v in vals.items():
+            out[f"{cat}.{k}"] = float(v) if np.isscalar(v) else float("nan")
+    return out
+
+
+def _downstream_benchmark_weights_dir(dataset_name: str, freq: str) -> Path:
+    """Weights dir for benchmarks; same convention as downstream_forecasting (load/save here)."""
+    return DOWNSTREAM_CACHE_ROOT / f"{dataset_name}_{freq}"
+
+
+def _downstream_lgta_weights_dir(dataset_name: str, freq: str) -> Path:
+    """Weights dir for LGTA model; same as downstream_forecasting cache/model_weights."""
+    return DOWNSTREAM_CACHE_ROOT / f"{dataset_name}_{freq}" / "model_weights"
+
+
+def _try_load_downstream_lgta(
+    dataset_name: str,
+    freq: str,
+) -> tuple | None:
+    """Load full L-GTA (no dynamic, 3var config) from downstream_forecasting cache if present.
+
+    Returns (model, z_mean, vae_creator) or None if weights are not found.
+    """
+    weights_dir = _downstream_lgta_weights_dir(dataset_name, freq)
+    if not weights_dir.exists():
+        return None
+    creator = CreateTransformedVersionsCVAE(
+        dataset_name=dataset_name,
+        freq=freq,
+        window_size=DOWNSTREAM_LGTA_WINDOW_SIZE,
+        weights_suffix=DOWNSTREAM_LGTA_WEIGHTS_SUFFIX,
+        weights_dir=weights_dir,
+        use_dynamic_features=False,
+        device=torch.device("cpu"),
+    )
+    dynamic_features_np, X_inp_np = creator._feature_engineering(creator.n_train)
+    n_main_features = X_inp_np.shape[-1]
+    weights_file = Path(
+        creator.weights_dir
+        / f"{creator.dataset_name}_n{n_main_features}_w{creator.window_size}_l{DOWNSTREAM_LGTA_LATENT_DIM}_vae_weights_{DOWNSTREAM_LGTA_WEIGHTS_SUFFIX}.pt"
+    )
+    if not weights_file.exists():
+        return None
+    model, _, _ = creator.fit(
+        epochs=1,
+        latent_dim=DOWNSTREAM_LGTA_LATENT_DIM,
+        load_weights=True,
+        equiv_weight=1.0,
+        latent_mode=LatentMode.TEMPORAL,
+    )
+    _, _, z_mean, _ = creator.predict(model, detemporalize_method="mean")
+    return (model, z_mean, creator)
+
+
+def _benchmark_weights_path(weights_dir: Path, gen: TimeSeriesGenerator) -> Path:
+    """Path for one generator's weights; matches downstream_forecasting._weights_path."""
+    return weights_dir / f"{gen.__class__.__name__}_weights.pt"
+
+
+def write_comparison_table_md(
+    run_result: AblationRunResult,
+    configs: list[ComponentAblationConfig],
+    output_dir: Path,
+    dataset_name: str,
+    freq: str,
+    n_benchmark_samples: int | None = None,
+) -> None:
+    """Write comparison_results.md: Full L-GTA (3var), Direct (3var), TimeGAN, TimeVAE, Diffusion-TS.
+
+    Uses 3var setup aligned with downstream_forecasting: one variant per transformation
+    (jitter, scaling, magnitude_warp) at σ=2 for L-GTA and Direct; 3 samples for benchmarks.
+    Benchmark models are loaded from downstream_forecasting cache when present (so run
+    downstream_forecasting first to train them, or they will be fit here and saved to that cache).
+    Mean ρ and Monotonic % come from ablation; benchmarks show "—".
+    All methods get pymdma metrics (fidelity, diversity, privacy, data_quality) from metrics.py.
+    """
+    if n_benchmark_samples is None:
+        n_benchmark_samples = COMPARISON_N_VARIANTS
+    output_dir.mkdir(parents=True, exist_ok=True)
+    X_orig = run_result.X_orig
+    valid_mask = run_result.valid_mask
+    results = run_result.results
+    trained_models = run_result.trained_models
+
+    full_lgta_result = next(
+        (r for r in results if r.name == FULL_LGTA_CONFIG_NAME),
+        None,
+    )
+    if full_lgta_result is None:
+        print(
+            f"Warning: {FULL_LGTA_CONFIG_NAME} not in results; skipping comparison table."
+        )
+        return
+
+    full_lgta_config = next(
+        (c for c in configs if c.name == FULL_LGTA_CONFIG_NAME),
+        None,
+    )
+    if full_lgta_config is None:
+        print(
+            f"Warning: {FULL_LGTA_CONFIG_NAME} not in configs; skipping comparison table."
+        )
+        return
+
+    sampling_freq = FREQ_TO_SAMPLING_FREQ.get(freq.upper().strip(), 1)
+    aggregator = MetricsAggregator(sampling_freq=sampling_freq)
+
+    lgta_source = _try_load_downstream_lgta(dataset_name, freq)
+    if lgta_source is not None:
+        model, z_mean, vae_creator = lgta_source
+        print("  Using L-GTA weights from downstream cache (no dynamic, 3var)")
+    else:
+        model, z_mean, _, vae_creator = trained_models[full_lgta_config.model_key]
+    rng = np.random.default_rng(BENCHMARK_SEED)
+    lgta_flat_list: list[dict[str, float]] = []
+    for transformation in COMPARISON_VARIANT_TRANSFORMATIONS:
+        X_lgta = generate_synthetic_data(
+            model,
+            z_mean,
+            vae_creator,
+            transformation,
+            [COMPARISON_SIGMA],
+            latent_mode=LatentMode.TEMPORAL,
+            rng=rng,
+        )
+        if valid_mask is not None:
+            X_lgta = X_lgta * valid_mask.astype(np.float32)
+        metrics = aggregator.compute_metrics_single(X_orig, X_lgta)
+        lgta_flat_list.append(_flatten_metrics(metrics))
+    lgta_avg_flat: dict[str, float] = {}
+    if lgta_flat_list:
+        for k in lgta_flat_list[0]:
+            lgta_avg_flat[k] = float(np.nanmean([f[k] for f in lgta_flat_list]))
+
+    X_orig_scaled = vae_creator.scaler_target.transform(X_orig)
+    direct_flat_list: list[dict[str, float]] = []
+    for transformation in COMPARISON_VARIANT_TRANSFORMATIONS:
+        X_direct_scaled = ManipulateData(
+            x=X_orig_scaled,
+            transformation=transformation,
+            parameters=[COMPARISON_SIGMA],
+        ).apply_transf()
+        X_direct = vae_creator.scaler_target.inverse_transform(X_direct_scaled)
+        if valid_mask is not None:
+            X_direct = X_direct * valid_mask.astype(np.float32)
+        metrics = aggregator.compute_metrics_single(X_orig, X_direct)
+        direct_flat_list.append(_flatten_metrics(metrics))
+    direct_avg_flat: dict[str, float] = {}
+    if direct_flat_list:
+        for k in direct_flat_list[0]:
+            direct_avg_flat[k] = float(np.nanmean([f[k] for f in direct_flat_list]))
+
+    synthetic_by_method: dict[str, dict[str, float]] = {}
+    if lgta_avg_flat:
+        synthetic_by_method[f"Full L-GTA (3var, σ={COMPARISON_SIGMA})"] = lgta_avg_flat
+    if direct_avg_flat:
+        synthetic_by_method[f"Direct (3var, σ={COMPARISON_SIGMA})"] = direct_avg_flat
+
+    benchmark_weights_dir = _downstream_benchmark_weights_dir(dataset_name, freq)
+    benchmark_metrics_avg: dict[str, dict[str, float]] = {}
+    for gen in get_default_benchmark_generators(seed=BENCHMARK_SEED):
+        if isinstance(gen, DirectTransformGenerator):
+            continue
+        try:
+            wp = _benchmark_weights_path(benchmark_weights_dir, gen)
+            if gen.load_weights(wp):
+                print(f"  Loaded {gen.name} weights from downstream cache")
+            else:
+                gen.fit(X_orig)
+                benchmark_weights_dir.mkdir(parents=True, exist_ok=True)
+                gen.save_weights(wp)
+            flat_list: list[dict[str, float]] = []
+            for _ in range(n_benchmark_samples):
+                X_syn = gen.generate()
+                metrics = aggregator.compute_metrics_single(X_orig, X_syn)
+                flat_list.append(_flatten_metrics(metrics))
+            keys = flat_list[0].keys() if flat_list else []
+            avg_flat: dict[str, float] = {}
+            for k in keys:
+                vals = [f[k] for f in flat_list]
+                avg_flat[k] = float(np.nanmean(vals))
+            benchmark_metrics_avg[f"{gen.name} (3var)"] = avg_flat
+        except Exception as e:
+            print(f"Warning: {gen.name} fit/generate failed: {e}")
+
+    direct_rho_mean = float(
+        np.mean([
+            tr.direct_spearman_rho
+            for tr in results[0].transformation_results.values()
+        ])
+    )
+    direct_mono_pct = float(
+        np.mean([
+            tr.direct_is_monotonic
+            for tr in results[0].transformation_results.values()
+        ])
+    ) * 100.0
+    full_lgta_rho_mean = float(
+        np.mean([tr.spearman_rho for tr in full_lgta_result.transformation_results.values()])
+    )
+    full_lgta_mono_pct = float(
+        np.mean([
+            tr.is_monotonic
+            for tr in full_lgta_result.transformation_results.values()
+        ])
+    ) * 100.0
+
+    method_order = [
+        f"Full L-GTA (3var, σ={COMPARISON_SIGMA})",
+        f"Direct (3var, σ={COMPARISON_SIGMA})",
+        "TimeGANGenerator (3var)",
+        "TimeVAEGenerator (3var)",
+        "DiffusionTSGenerator (3var)",
+    ]
+    rows: list[dict[str, str | float]] = []
+    all_metric_keys: list[str] = []
+    for method in method_order:
+        if method in synthetic_by_method:
+            flat = synthetic_by_method[method]
+            if not all_metric_keys:
+                all_metric_keys = sorted(flat.keys())
+            if "Full L-GTA" in method:
+                mean_rho: str | float = full_lgta_rho_mean
+                mono_pct = full_lgta_mono_pct
+            else:
+                mean_rho = direct_rho_mean
+                mono_pct = direct_mono_pct
+        elif method in benchmark_metrics_avg:
+            flat = benchmark_metrics_avg[method]
+            if not all_metric_keys:
+                all_metric_keys = sorted(flat.keys())
+            mean_rho = "—"
+            mono_pct = "—"
+        else:
+            continue
+        row: dict[str, str | float] = {
+            "Method": method,
+            "Mean ρ": mean_rho,
+            "Monotonic %": mono_pct,
+        }
+        for k in all_metric_keys:
+            row[k] = flat.get(k, float("nan"))
+        rows.append(row)
+
+    header = ["Method", "Mean ρ", "Monotonic %"] + all_metric_keys
+    lines = [
+        "# Comparison: Full L-GTA vs benchmarks (all methods 3var)",
+        "",
+        "**All methods 3var** (aligned with downstream_forecasting): "
+        "L-GTA and Direct use 3 variants (one per transformation: "
+        f"{', '.join(COMPARISON_VARIANT_TRANSFORMATIONS)}) at σ={COMPARISON_SIGMA}; "
+        "TimeGAN, TimeVAE, Diffusion-TS use 3 samples each. "
+        "Mean ρ / Monotonic % from ablation (— for benchmarks). "
+        "Metrics averaged over variants/samples.",
+        "",
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in header) + " |",
+    ]
+    for row in rows:
+        cells: list[str] = []
+        for h in header:
+            v = row.get(h, "")
+            if v == "—":
+                cells.append("—")
+            elif isinstance(v, float):
+                if np.isnan(v):
+                    cells.append("—")
+                elif h == "Monotonic %":
+                    cells.append(f"{v:.1f}%")
+                else:
+                    cells.append(f"{v:.4f}")
+            else:
+                cells.append(str(v))
+        lines.append("| " + " | ".join(cells) + " |")
+
+    out = output_dir / "comparison_results.md"
+    out.write_text("\n".join(lines) + "\n")
+    print(f"Saved: {out}")
 
 
 def plot_component_ablation(
@@ -609,13 +976,13 @@ def plot_component_ablation(
     output_dir: Path,
 ) -> None:
     """Generate ablation plots: monotonic response grid, signature bars,
-    reconstruction-controllability scatter, and summary heatmap."""
+    reconstruction-controllability scatter, and ablation results table (MD)."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     _plot_monotonic_response_grid(results, sigma_values, output_dir)
     _plot_signature_comparison(results, output_dir)
     _plot_recon_vs_controllability(results, output_dir)
-    _plot_summary_heatmap(results, sigma_values, output_dir)
+    write_ablation_table_md(results, sigma_values, output_dir)
 
 
 def _plot_monotonic_response_grid(
@@ -723,81 +1090,6 @@ def _plot_recon_vs_controllability(
     plt.close()
 
 
-def _plot_summary_heatmap(
-    results: list[ComponentAblationResult],
-    sigma_values: list[float],
-    output_dir: Path,
-) -> None:
-    variant_names = [r.name for r in results]
-    metric_names = [
-        "Mean rho", "Direct rho", "Monotonic %", "Direct Mono %",
-        "Recon MSE", "Mean FP dist",
-    ]
-    n_variants = len(results)
-    n_metrics = len(metric_names)
-
-    direct_rho_mean = np.mean([
-        tr.direct_spearman_rho for tr in results[0].transformation_results.values()
-    ])
-    direct_mono_mean = np.mean([
-        tr.direct_is_monotonic for tr in results[0].transformation_results.values()
-    ]) * 100.0
-    direct_mse_mean = np.mean([
-        tr.direct_mse for tr in results[0].transformation_results.values()
-    ])
-
-    n_rows = n_variants + 1
-    data = np.zeros((n_rows, n_metrics))
-
-    for i, r in enumerate(results):
-        rhos = [tr.spearman_rho for tr in r.transformation_results.values()]
-        monos = [tr.is_monotonic for tr in r.transformation_results.values()]
-        fp_dists = [tr.fingerprint_distance for tr in r.transformation_results.values()]
-        data[i, 0] = np.mean(rhos)
-        data[i, 1] = direct_rho_mean
-        data[i, 2] = np.mean(monos) * 100.0
-        data[i, 3] = direct_mono_mean
-        data[i, 4] = r.recon_mse
-        data[i, 5] = np.mean(fp_dists)
-
-    data[n_variants, 0] = direct_rho_mean
-    data[n_variants, 1] = direct_rho_mean
-    data[n_variants, 2] = direct_mono_mean
-    data[n_variants, 3] = direct_mono_mean
-    data[n_variants, 4] = direct_mse_mean
-    data[n_variants, 5] = 0.0
-
-    variant_names = list(variant_names) + ["Direct (baseline)"]
-    plot_data = data
-
-    fig, ax = plt.subplots(figsize=(10, max(3, n_rows * 0.8 + 1)))
-    im = ax.imshow(plot_data, aspect="auto", cmap="RdYlGn_r")
-
-    ax.set_xticks(range(n_metrics))
-    ax.set_xticklabels(metric_names, fontsize=10)
-    ax.set_yticks(range(n_rows))
-    ax.set_yticklabels(variant_names, fontsize=10)
-
-    for i in range(n_rows):
-        for j in range(n_metrics):
-            fmt = ".1f" if j in (2, 3) else ".3f"
-            ax.text(j, i, f"{data[i, j]:{fmt}}", ha="center", va="center",
-                    fontsize=9, color="black")
-
-    fig.colorbar(im, ax=ax, shrink=0.8)
-    sigma_str = ", ".join(str(s) for s in sigma_values)
-    ax.set_title(
-        f"Component Ablation Summary (σ ∈ {{{sigma_str}}})",
-        fontsize=14,
-        fontweight="bold",
-    )
-    plt.tight_layout()
-    out = output_dir / "summary_heatmap.png"
-    plt.savefig(out, dpi=300, bbox_inches="tight")
-    print(f"Saved: {out}")
-    plt.close()
-
-
 def print_component_ablation_report(
     results: list[ComponentAblationResult],
 ) -> None:
@@ -895,6 +1187,13 @@ STANDARD_CONFIGS: list[ComponentAblationConfig] = [
         equiv_weight=1.0,
         use_dynamic_features=False,
     ),
+    ComponentAblationConfig(
+        name="H: Channel attn, no dynamic",
+        latent_mode=LatentMode.TEMPORAL,
+        equiv_weight=0.0,
+        use_channel_attention=True,
+        use_dynamic_features=False,
+    ),
 ]
 
 
@@ -948,7 +1247,7 @@ if __name__ == "__main__":
         print(f"  Output: {dataset_output_dir}")
         print(f"  Weights: {weights_dir}")
         print("="*70)
-        ablation_results = run_component_ablation(
+        run_result = run_component_ablation(
             STANDARD_CONFIGS,
             dataset_name=dataset_name,
             freq=freq,
@@ -958,11 +1257,18 @@ if __name__ == "__main__":
             use_cache=not args.no_cache,
         )
         plot_component_ablation(
-            ablation_results,
+            run_result.results,
             STANDARD_CONFIGS[0].sigma_values,
             dataset_output_dir,
         )
-        print_component_ablation_report(ablation_results)
+        print_component_ablation_report(run_result.results)
+        write_comparison_table_md(
+            run_result,
+            STANDARD_CONFIGS,
+            dataset_output_dir,
+            dataset_name=dataset_name,
+            freq=freq,
+        )
 
     if args.all_datasets:
         for dataset_name, freq in DEFAULT_ABLATION_DATASETS:
