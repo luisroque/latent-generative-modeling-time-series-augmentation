@@ -17,7 +17,6 @@ from .utils import generate_groups_data_flat, generate_groups_data_matrix
 
 M3_GROUP_BY_FREQ: dict[str, tuple[str, int, int]] = {
     "Y": ("Yearly", 1, 6),
-    "Q": ("Quarterly", 4, 8),
     "M": ("Monthly", 12, 18),
     "D": ("Other", 1, 8),
 }
@@ -46,7 +45,7 @@ class PreprocessDatasets:
         - wiki2: Daily Wikipedia views (HierarchicalData)
         - labour: Australian monthly labour (HierarchicalData)
         - synthetic: Randomly generated time series
-        - m3: M3 competition; freq selects group (Y/Q/M/D).
+        - m3: M3 competition; freq selects group (Y/M/D).
         - m4: M4 competition (small groups only); freq selects group (W=Weekly, H=Hourly).
 
     Attributes

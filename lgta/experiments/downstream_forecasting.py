@@ -18,6 +18,7 @@ or as a module (python -m lgta.experiments.downstream_forecasting) provided
 the repo root is on PYTHONPATH or you run from the repo root.
 """
 
+import csv
 import gc
 import json
 import re
@@ -65,7 +66,6 @@ DEFAULT_DATASET_CONFIGS: list[tuple[str, str]] = [
     ("wiki2", "D"),
     ("labour", "M"),
     ("m3", "Y"),
-    ("m3", "Q"),
     ("m3", "M"),
     # ("m4", "W"),
     # ("m4", "H"),
@@ -1728,6 +1728,238 @@ def _write_combined_summary(output_dir: Path) -> None:
             f.write(",".join(row) + "\n")
 
     print(f"Combined summary written to {md_path} and {csv_path}")
+    _write_rankings(output_dir, csv_path)
+    _write_aggregated_summary(output_dir, csv_path)
+
+
+def _write_rankings(output_dir: Path, combined_csv_path: Path) -> None:
+    """Write RANKINGS.md from COMBINED_RESULTS.csv: rank methods per (Dataset, Freq, Variants, Dynamic) for TSTR and downstream_task."""
+    if not combined_csv_path.exists():
+        return
+    rows: list[dict[str, str]] = []
+    with combined_csv_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+    if not rows:
+        return
+
+    def parse_mase(s: str) -> float | None:
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    key_to_entries: dict[tuple[str, str, str, str], list[tuple[str, float | None, float | None]]] = {}
+    for r in rows:
+        dataset = r.get("Dataset", "")
+        freq = r.get("Freq", "")
+        method = r.get("Method", "")
+        variants = r.get("Variants", "")
+        dynamic = r.get("Dynamic", "")
+        tstr_mase = parse_mase(r.get("TSTR MASE", ""))
+        downstream_mase = parse_mase(r.get("downstream_task MASE", ""))
+        key = (dataset, freq, variants, dynamic)
+        key_to_entries.setdefault(key, []).append((method, tstr_mase, downstream_mase))
+
+    def rank_order(values: list[tuple[str, float | None]], lower_better: bool = True) -> list[str]:
+        sorted_pairs = sorted(
+            values,
+            key=lambda x: (x[1] is None, x[1] if x[1] is not None else (0.0 if lower_better else 1e9)),
+            reverse=not lower_better,
+        )
+        return [m for m, _ in sorted_pairs]
+
+    md_lines = [
+        "# Method Rankings by Dataset and Split",
+        "",
+        "Ranks per (Dataset, Freq, Variants, Dynamic). Lower MASE = better (rank 1).",
+        "TSTR = train on synthetic only; downstream = train on original + synthetic.",
+        "",
+        "| Dataset | Freq | Variants | Dynamic | TSTR (1st → last) | downstream_task (1st → last) |",
+        "|---------|------|----------|--------|-------------------|------------------------------|",
+    ]
+    groups = sorted(key_to_entries.keys())
+    for (dataset, freq, variants, dynamic) in groups:
+        entries = key_to_entries[(dataset, freq, variants, dynamic)]
+        tstr_order = rank_order([(m, t) for m, t, _ in entries])
+        downstream_order = rank_order([(m, d) for m, _, d in entries])
+        tstr_str = "<br>".join(f"{i+1}. {m}" for i, m in enumerate(tstr_order))
+        downstream_str = "<br>".join(f"{i+1}. {m}" for i, m in enumerate(downstream_order))
+        md_lines.append(f"| {dataset} | {freq} | {variants} | {dynamic} | {tstr_str} | {downstream_str} |")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rank_path = output_dir / "RANKINGS.md"
+    rank_path.write_text("\n".join(md_lines) + "\n")
+    print(f"Rankings written to {rank_path}")
+
+
+def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None:
+    """Write SUMMARY.md with reader-friendly aggregates: mean MASE per method, win rates, and LGTA config comparison.
+
+    One row per (Dataset, Freq, Variants, Dynamic) counts as one cell. Mean MASE is the average over cells
+    of (TSTR MASE + downstream_task MASE) / 2. Win rate is the share of cells where the method ranks 1st.
+    """
+    if not combined_csv_path.exists():
+        return
+    rows: list[dict[str, str]] = []
+    with combined_csv_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+    if not rows:
+        return
+
+    def parse_mase(s: str) -> float | None:
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    key_to_entries: dict[
+        tuple[str, str, str, str],
+        list[tuple[str, float | None, float | None]],
+    ] = {}
+    for r in rows:
+        dataset = r.get("Dataset", "")
+        freq = r.get("Freq", "")
+        method = r.get("Method", "")
+        variants = r.get("Variants", "")
+        dynamic = r.get("Dynamic", "")
+        tstr_mase = parse_mase(r.get("TSTR MASE", ""))
+        downstream_mase = parse_mase(r.get("downstream_task MASE", ""))
+        key = (dataset, freq, variants, dynamic)
+        key_to_entries.setdefault(key, []).append((method, tstr_mase, downstream_mase))
+
+    def rank_order(
+        values: list[tuple[str, float | None]], lower_better: bool = True
+    ) -> list[str]:
+        sorted_pairs = sorted(
+            values,
+            key=lambda x: (
+                x[1] is None,
+                x[1] if x[1] is not None else (0.0 if lower_better else 1e9),
+            ),
+            reverse=not lower_better,
+        )
+        return [m for m, _ in sorted_pairs]
+
+    cells = sorted(
+        k
+        for k in key_to_entries.keys()
+        if k[2] == "3var"
+        and k[3] == "No"
+    )
+    n_cells = len(cells)
+
+    method_to_combined_mase: dict[str, list[float]] = {}
+    method_to_wins_tstr: dict[str, int] = {}
+    method_to_wins_downstream: dict[str, int] = {}
+    method_to_wins_either: dict[str, int] = {}
+
+    for (dataset, freq, variants, dynamic) in cells:
+        entries = key_to_entries[(dataset, freq, variants, dynamic)]
+        tstr_order = rank_order([(m, t) for m, t, _ in entries])
+        downstream_order = rank_order([(m, d) for m, _, d in entries])
+        for method, tstr_mase, down_mase in entries:
+            if method not in method_to_combined_mase:
+                method_to_combined_mase[method] = []
+                method_to_wins_tstr[method] = 0
+                method_to_wins_downstream[method] = 0
+                method_to_wins_either[method] = 0
+            if tstr_mase is not None and down_mase is not None:
+                method_to_combined_mase[method].append((tstr_mase + down_mase) / 2.0)
+            if tstr_order and tstr_order[0] == method:
+                method_to_wins_tstr[method] += 1
+            if downstream_order and downstream_order[0] == method:
+                method_to_wins_downstream[method] += 1
+            if (tstr_order and tstr_order[0] == method) or (
+                downstream_order and downstream_order[0] == method
+            ):
+                method_to_wins_either[method] += 1
+
+    def mean_mase(method: str) -> float | None:
+        vals = method_to_combined_mase.get(method) or []
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+
+    all_methods = sorted(method_to_combined_mase.keys())
+    method_rows = [
+        (m, mean_mase(m), method_to_wins_tstr.get(m, 0), method_to_wins_downstream.get(m, 0), method_to_wins_either.get(m, 0))
+        for m in all_methods
+    ]
+    method_rows.sort(key=lambda x: (x[1] is None, x[1] if x[1] is not None else 1e9))
+
+    lgta_config_to_combined_mase: dict[tuple[str, str], list[float]] = {}
+    for r in rows:
+        if r.get("Method") != "LGTA":
+            continue
+        dataset = r.get("Dataset", "")
+        freq = r.get("Freq", "")
+        variants = r.get("Variants", "")
+        dynamic = r.get("Dynamic", "")
+        tstr_mase = parse_mase(r.get("TSTR MASE", ""))
+        down_mase = parse_mase(r.get("downstream_task MASE", ""))
+        if tstr_mase is not None and down_mase is not None:
+            key = (variants, dynamic)
+            lgta_config_to_combined_mase.setdefault(key, []).append(
+                (tstr_mase + down_mase) / 2.0
+            )
+    lgta_config_rows = [
+        (var, dyn, sum(v) / len(v), len(v))
+        for (var, dyn), v in lgta_config_to_combined_mase.items()
+    ]
+    lgta_config_rows.sort(key=lambda x: x[2])
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "SUMMARY.md"
+    md_lines = [
+        "# Aggregated Summary: Downstream Forecasting",
+        "",
+        "**Mean MASE** = average over cells of (TSTR MASE + downstream_task MASE) / 2. "
+        "**Win rate** = share of cells where the method ranks 1st (lower MASE). "
+        "The method table below uses only **3var, no dynamic** cells.",
+        "",
+        "## Mean MASE by method (3var, no dynamic)",
+        "",
+        "| Method | Mean MASE | 1st in TSTR | 1st in downstream | 1st in either |",
+        "|--------|-----------|-------------|--------------------|---------------|",
+    ]
+    for m, avg, w_t, w_d, w_e in method_rows:
+        avg_str = f"{avg:.4f}" if avg is not None else "—"
+        md_lines.append(f"| {m} | {avg_str} | {w_t}/{n_cells} | {w_d}/{n_cells} | {w_e}/{n_cells} |")
+    md_lines.append("")
+    md_lines.append("## LGTA: mean MASE by configuration")
+    md_lines.append("")
+    md_lines.append("| Variants | Dynamic | Mean MASE | Cells |")
+    md_lines.append("|---------|--------|-----------|-------|")
+    for var, dyn, avg, count in lgta_config_rows:
+        md_lines.append(f"| {var} | {dyn} | {avg:.4f} | {count} |")
+    md_lines.append("")
+    best_method = method_rows[0]
+    best_lgta = lgta_config_rows[0] if lgta_config_rows else None
+    md_lines.append("## Recommendations")
+    md_lines.append("")
+    md_lines.append(
+        f"- **Best method overall (lowest mean MASE):** {best_method[0]} "
+        f"(mean MASE {best_method[1]:.4f})."
+    )
+    if best_lgta:
+        md_lines.append(
+            f"- **Best LGTA configuration:** {best_lgta[0]} + dynamic={best_lgta[1]} "
+            f"(mean MASE {best_lgta[2]:.4f})."
+        )
+    md_lines.append("")
+
+    summary_path.write_text("\n".join(md_lines) + "\n")
+    print(f"Aggregated summary written to {summary_path}")
 
 
 def _write_resource_usage_summary(output_dir: Path) -> None:
@@ -1806,7 +2038,7 @@ if __name__ == "__main__":
         "--freq",
         type=str,
         default=None,
-        help="Time series frequency (e.g. Y, Q, M, D, W, H). Y/Q/M for m3 and m4, W/H for m4.",
+        help="Time series frequency (e.g. Y, Q, M, D, W, H). Y/M/D for m3, W/H for m4.",
     )
     parser.add_argument(
         "--all-datasets",

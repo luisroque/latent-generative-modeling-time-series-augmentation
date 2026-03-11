@@ -29,14 +29,15 @@ DEFAULT_ABLATION_DATASETS: list[tuple[str, str]] = [
     ("tourism", "Q"),
     ("wiki2", "D"),
     ("labour", "M"),
-    ("m3", "Q"),
+    ("m3", "Y"),
+    ("m3", "M"),
 ]
 
 CACHE_ABLATION_ROOT = Path("assets/cache/component_ablation")
 
 
-def _results_cache_dir(dataset_name: str) -> Path:
-    return CACHE_ABLATION_ROOT / dataset_name / "results"
+def _results_cache_dir(dataset_name: str, freq: str) -> Path:
+    return CACHE_ABLATION_ROOT / dataset_name / freq / "results"
 
 
 def _load_cached_transformation_result(
@@ -425,7 +426,7 @@ def run_component_ablation(
 
     Models are saved under weights_dir with a unique suffix per config (model_key)
     and loaded on subsequent runs when use_cache is True. Transformation
-    evaluation results are cached under assets/cache/component_ablation/<dataset>/results.
+    evaluation results are cached under assets/cache/component_ablation/<dataset>/<freq>/results.
     If plots_output_dir is set, for each variant generates synthetic data
     and saves original-vs-synthetic plot(s) under plots_output_dir (no subfolders).
     If plot_per_sigma is False: one plot per variant using plot_synthetic_sigma.
@@ -437,7 +438,7 @@ def run_component_ablation(
     results: list[ComponentAblationResult] = []
     X_orig: np.ndarray | None = None
     valid_mask: np.ndarray | None = None
-    results_cache_dir = _results_cache_dir(dataset_name) if use_cache else None
+    results_cache_dir = _results_cache_dir(dataset_name, freq) if use_cache else None
 
     for config in configs:
         if config.model_key not in trained_models:
@@ -924,7 +925,7 @@ if __name__ == "__main__":
         "--output-dir",
         type=Path,
         default=Path("assets/results/component_ablation"),
-        help="Base directory for results; each dataset gets a subfolder named by dataset (e.g. output_dir/tourism/).",
+        help="Base directory for results; each (dataset, freq) gets a subfolder (e.g. output_dir/tourism/Q/, output_dir/m3/Y/).",
     )
     parser.add_argument(
         "--no-cache",
@@ -938,9 +939,9 @@ if __name__ == "__main__":
     CACHE_ABLATION_ROOT.mkdir(parents=True, exist_ok=True)
 
     def run_one(dataset_name: str, freq: str) -> None:
-        dataset_output_dir = base_output_dir / dataset_name
+        dataset_output_dir = base_output_dir / dataset_name / freq
         dataset_output_dir.mkdir(parents=True, exist_ok=True)
-        weights_dir = CACHE_ABLATION_ROOT / dataset_name / "model_weights"
+        weights_dir = CACHE_ABLATION_ROOT / dataset_name / freq / "model_weights"
         weights_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n{'='*70}")
         print(f"Component ablation: dataset={dataset_name}, freq={freq}")
