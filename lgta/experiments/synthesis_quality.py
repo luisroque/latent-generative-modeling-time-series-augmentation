@@ -1,11 +1,6 @@
 """
 Synthesis quality experiment: compare synthetic vs real data using pymdma metrics.
 
-Research question: Can L-GTA generate synthetic data with greater privacy than
-benchmark generators (TimeGAN, TimeVAE, Direct), while utility is already tested
-in downstream_forecasting? Privacy is measured by Authenticity (higher = more
-privacy, less memorization). We also report fidelity, diversity, and data quality.
-
 Uses the same cache as downstream_forecasting; run that experiment first to
 populate synthetic data, then run this script to compute metrics.
 """
@@ -69,7 +64,10 @@ def _run_synthesis_quality_for_config(
         )
 
     sampling_freq = FREQ_TO_SAMPLING_FREQ.get(cfg.freq.upper().strip(), 1)
-    aggregator = MetricsAggregator(sampling_freq=sampling_freq)
+    feature_cache = cache_dir / "tsfel_features"
+    aggregator = MetricsAggregator(
+        sampling_freq=sampling_freq, cache_dir=feature_cache
+    )
     results_by_method: dict[str, dict[str, dict[str, float]]] = {}
 
     for method_name in methods:
@@ -167,7 +165,7 @@ def _plot_authenticity(
 def run_synthesis_quality(cfg: Any) -> dict[str, dict[str, dict[str, float]]]:
     """Load synthetic data from downstream_forecasting cache and compute synthesis quality metrics.
 
-    Returns results_by_method: method_name -> { fidelity, diversity, privacy, data_quality }.
+    Returns results_by_method: method_name -> { fidelity, diversity, privacy }.
     """
     from lgta.experiments.downstream_forecasting import (
         ExperimentConfig,

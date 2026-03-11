@@ -11,3 +11,4 @@ datasetsforecast==1.0.1
 pymdma==0.2.2
 einops>=0.6.0
 ema-pytorch>=0.2.1
+tsfel==0.2.0

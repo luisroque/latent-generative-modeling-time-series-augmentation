@@ -763,8 +763,9 @@ def write_comparison_table_md(
     (jitter, scaling, magnitude_warp) at σ=2 for L-GTA and Direct; 3 samples for benchmarks.
     Benchmark models are loaded from downstream_forecasting cache when present (so run
     downstream_forecasting first to train them, or they will be fit here and saved to that cache).
-    Mean ρ and Monotonic % come from ablation; benchmarks show "—".
-    All methods get pymdma metrics (fidelity, diversity, privacy, data_quality) from metrics.py.
+    Mean ρ and Monotonic % from ablation (L-GTA and Direct only). Benchmarks are evaluated
+    by generating samples and comparing to original only (no transformation/σ-sweep), so
+    those columns show — for benchmarks. All methods get pymdma metrics from metrics.py.
     """
     if n_benchmark_samples is None:
         n_benchmark_samples = COMPARISON_N_VARIANTS
@@ -795,7 +796,10 @@ def write_comparison_table_md(
         return
 
     sampling_freq = FREQ_TO_SAMPLING_FREQ.get(freq.upper().strip(), 1)
-    aggregator = MetricsAggregator(sampling_freq=sampling_freq)
+    feature_cache = DOWNSTREAM_CACHE_ROOT / f"{dataset_name}_{freq}" / "tsfel_features"
+    aggregator = MetricsAggregator(
+        sampling_freq=sampling_freq, cache_dir=feature_cache
+    )
 
     lgta_source = _try_load_downstream_lgta(dataset_name, freq)
     if lgta_source is not None:
@@ -921,8 +925,8 @@ def write_comparison_table_md(
             flat = benchmark_metrics_avg[method]
             if not all_metric_keys:
                 all_metric_keys = sorted(flat.keys())
-            mean_rho = "—"
-            mono_pct = "—"
+            mean_rho: str | float = "—"
+            mono_pct: str | float = "—"
         else:
             continue
         row: dict[str, str | float] = {
@@ -942,7 +946,7 @@ def write_comparison_table_md(
         "L-GTA and Direct use 3 variants (one per transformation: "
         f"{', '.join(COMPARISON_VARIANT_TRANSFORMATIONS)}) at σ={COMPARISON_SIGMA}; "
         "TimeGAN, TimeVAE, Diffusion-TS use 3 samples each. "
-        "Mean ρ / Monotonic % from ablation (— for benchmarks). "
+        "Mean ρ / Monotonic % from ablation (L-GTA and Direct only); benchmarks have no σ-sweep (generate vs original only), so —."
         "Metrics averaged over variants/samples.",
         "",
         "| " + " | ".join(header) + " |",

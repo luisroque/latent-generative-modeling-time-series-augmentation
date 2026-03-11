@@ -1,55 +1,105 @@
-"""
-Evaluation metrics for time series augmentation using pymdma framework.
+"""Evaluation metrics for time series augmentation using pymdma framework.
 
-All metrics come from pymdma's synthesis validation module, organized by:
-- Fidelity: How realistic are the augmented series (feature-based quality)
-- Diversity: Are augmented series diverse yet meaningful (feature-based quality)
-- Privacy: Are augmented series genuinely novel, not memorized (feature-based privacy)
-- Data Quality: Are key signal properties preserved (data-based quality)
+Features are extracted from each series using TSFEL (statistical, temporal,
+spectral domains), then compared via pymdma feature-based metrics for
+fidelity, diversity, and privacy assessment.
 
-pymdma reference: https://pymdma.readthedocs.io/en/latest/time_series/synth_val/
+pymdma: https://pymdma.readthedocs.io/en/latest/time_series/synth_val/
+tsfel:  https://tsfel.readthedocs.io/en/latest/descriptions/feature_list.html
 """
+
+import hashlib
+import warnings
+from pathlib import Path
+from typing import Dict
 
 import numpy as np
-from typing import Dict, List
-import warnings
+import pandas as pd
+import tsfel
 
 from pymdma.time_series.measures.synthesis_val import (
+    Authenticity,
+    CosineSimilarity,
+    Coverage,
+    Density,
+    FrechetDistance,
     ImprovedPrecision,
     ImprovedRecall,
-    Density,
-    Coverage,
-    FrechetDistance,
-    WassersteinDistance,
     MMD,
-    CosineSimilarity,
-    Authenticity,
-    DTW,
-    CrossCorrelation,
-    SpectralCoherence,
-    SpectralWassersteinDistance,
+    WassersteinDistance,
 )
 
 warnings.filterwarnings("ignore")
 
-
-def _to_features(X: np.ndarray) -> np.ndarray:
-    """Convert (n_timesteps, n_series) to (n_series, n_timesteps) for feature-based metrics."""
-    return X.T
+_TSFEL_CFG = tsfel.get_features_by_domain()
 
 
-def _to_signals(X: np.ndarray) -> List[np.ndarray]:
-    """Convert (n_timesteps, n_series) to list of (n_timesteps, 1) arrays for data-based metrics."""
-    return [X[:, i : i + 1] for i in range(X.shape[1])]
+def _feature_cache_key(X: np.ndarray, sampling_freq: int) -> str:
+    """Deterministic hash from array content, shape, and sampling frequency."""
+    h = hashlib.sha256()
+    h.update(X.tobytes())
+    h.update(f"{X.shape}|{sampling_freq}".encode())
+    return h.hexdigest()[:16]
+
+
+def extract_tsfel_features(
+    X: np.ndarray,
+    sampling_freq: int = 1,
+    cache_dir: Path | None = None,
+) -> np.ndarray:
+    """Extract TSFEL features (statistical, temporal, spectral) from each series.
+
+    Each column in X is treated as an independent univariate time series.
+    Features that are all-NaN across series are dropped; remaining NaN/inf
+    values are replaced with 0.
+
+    When ``cache_dir`` is provided, features are saved as a ``.npy`` file keyed
+    by a hash of the input data and sampling frequency.  On subsequent calls
+    with identical inputs the cached file is loaded directly, skipping the
+    (potentially expensive) TSFEL extraction.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Shape ``(n_timesteps, n_series)``.
+    sampling_freq : int
+        Sampling frequency passed to TSFEL for spectral features.
+    cache_dir : Path or None
+        Directory for caching extracted features.  ``None`` disables caching.
+
+    Returns
+    -------
+    np.ndarray
+        Shape ``(n_series, n_features)``.
+    """
+    if cache_dir is not None:
+        cache_path = cache_dir / f"tsfel_features_{_feature_cache_key(X, sampling_freq)}.npy"
+        if cache_path.exists():
+            return np.load(cache_path)
+
+    feature_rows: list[np.ndarray] = []
+    for i in range(X.shape[1]):
+        series = pd.DataFrame(X[:, i], columns=["value"])
+        feats = tsfel.time_series_features_extractor(
+            _TSFEL_CFG, series, fs=sampling_freq, verbose=0
+        )
+        feature_rows.append(feats.values[0])
+
+    features = np.array(feature_rows, dtype=np.float64)
+
+    valid_cols = ~np.all(np.isnan(features), axis=0)
+    features = features[:, valid_cols]
+    features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        np.save(cache_path, features)
+
+    return features
 
 
 class FidelityMetrics:
-    """Measures how realistic augmented series are.
-
-    ImprovedPrecision and Density measure fidelity via manifold estimation.
-    FrechetDistance, WassersteinDistance, MMD, CosineSimilarity measure
-    distributional distance between original and augmented feature sets.
-    """
+    """Manifold and distributional metrics measuring how realistic augmented series are."""
 
     def __init__(self, k: int = 5):
         self._precision = ImprovedPrecision(k=k)
@@ -59,10 +109,9 @@ class FidelityMetrics:
         self._mmd = MMD(kernel="linear", compute_ratios=False)
         self._cosine = CosineSimilarity()
 
-    def compute(self, X_orig: np.ndarray, X_augmented: np.ndarray) -> Dict[str, float]:
-        real_feats = _to_features(X_orig)
-        fake_feats = _to_features(X_augmented)
-
+    def compute(
+        self, real_feats: np.ndarray, fake_feats: np.ndarray
+    ) -> Dict[str, float]:
         return {
             "improved_precision": self._precision.compute(
                 real_feats, fake_feats
@@ -84,20 +133,15 @@ class FidelityMetrics:
 
 
 class DiversityMetrics:
-    """Measures diversity of augmented series.
-
-    ImprovedRecall measures how well the generated data covers the real distribution.
-    Coverage is a robust alternative that is less sensitive to outliers.
-    """
+    """Manifold coverage metrics measuring diversity of augmented series."""
 
     def __init__(self, k: int = 5):
         self._recall = ImprovedRecall(k=k)
         self._coverage = Coverage(k=k)
 
-    def compute(self, X_orig: np.ndarray, X_augmented: np.ndarray) -> Dict[str, float]:
-        real_feats = _to_features(X_orig)
-        fake_feats = _to_features(X_augmented)
-
+    def compute(
+        self, real_feats: np.ndarray, fake_feats: np.ndarray
+    ) -> Dict[str, float]:
         return {
             "improved_recall": self._recall.compute(
                 real_feats, fake_feats
@@ -109,19 +153,14 @@ class DiversityMetrics:
 
 
 class PrivacyMetrics:
-    """Measures whether augmented series are genuinely novel.
+    """Authenticity metric checking augmented series are novel, not memorised."""
 
-    Authenticity checks that synthetic samples are sufficiently distinct from
-    any real sample, detecting memorization/copying.
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._authenticity = Authenticity()
 
-    def compute(self, X_orig: np.ndarray, X_augmented: np.ndarray) -> Dict[str, float]:
-        real_feats = _to_features(X_orig)
-        fake_feats = _to_features(X_augmented)
-
+    def compute(
+        self, real_feats: np.ndarray, fake_feats: np.ndarray
+    ) -> Dict[str, float]:
         return {
             "authenticity": self._authenticity.compute(
                 real_feats, fake_feats
@@ -129,79 +168,30 @@ class PrivacyMetrics:
         }
 
 
-class DataQualityMetrics:
-    """Measures preservation of signal properties using pymdma data-based metrics.
-
-    DTW and CrossCorrelation compare temporal structure.
-    SpectralCoherence and SpectralWassersteinDistance compare frequency-domain
-    properties and require a sampling frequency (fs) parameter per dataset.
-    DTW is O(N*M) so we sample a subset of series for efficiency.
-    """
-
-    def __init__(self, sampling_freq: int = 1, max_series: int = 30):
-        self._dtw = DTW()
-        self._cross_corr = CrossCorrelation(mode="full", reduction="max")
-        self._spectral_coherence = SpectralCoherence(fs=sampling_freq)
-        self._spectral_wasserstein = SpectralWassersteinDistance(fs=sampling_freq)
-        self._max_series = max_series
-
-    def compute(self, X_orig: np.ndarray, X_augmented: np.ndarray) -> Dict[str, float]:
-        n_series = X_orig.shape[1]
-        n_sample = min(n_series, self._max_series)
-
-        if n_series > n_sample:
-            indices = np.random.choice(n_series, n_sample, replace=False)
-        else:
-            indices = np.arange(n_series)
-
-        ref_sigs = _to_signals(X_orig[:, indices])
-        tgt_sigs = _to_signals(X_augmented[:, indices])
-
-        dtw_result = self._dtw.compute(ref_sigs, tgt_sigs)
-        cc_result = self._cross_corr.compute(ref_sigs, tgt_sigs)
-
-        real_spectral = _to_features(X_orig)
-        fake_spectral = _to_features(X_augmented)
-        spectral_coherence_val: float = float("nan")
-        spectral_wasserstein_val: float = float("nan")
-        try:
-            sc_result = self._spectral_coherence.compute(real_spectral, fake_spectral)
-            swd_result = self._spectral_wasserstein.compute(
-                real_spectral, fake_spectral
-            )
-            spectral_coherence_val = float(sc_result.dataset_level.value)
-            spectral_wasserstein_val = float(swd_result.dataset_level.value)
-        except ValueError:
-            pass
-
-        return {
-            "dtw": float(dtw_result.dataset_level.value),
-            "cross_correlation": float(cc_result.dataset_level.value),
-            "spectral_coherence": spectral_coherence_val,
-            "spectral_wasserstein": spectral_wasserstein_val,
-        }
-
-
 class MetricsAggregator:
-    """Aggregates all pymdma metrics for comprehensive evaluation.
+    """Extracts TSFEL features once, caches them, and runs all pymdma metrics.
 
-    Categories: fidelity, diversity, privacy, data_quality.
-    The sampling_freq parameter should be set per dataset (e.g. 12 for monthly,
-    52 for weekly, 365 for daily) and is passed to spectral metrics.
+    Categories: fidelity, diversity, privacy.
+    ``sampling_freq`` is forwarded to TSFEL for spectral feature extraction
+    (e.g. 4 for quarterly, 12 for monthly, 52 for weekly, 365 for daily).
+    ``cache_dir`` enables on-disk caching of the extracted feature arrays so
+    repeated runs with the same data skip the TSFEL extraction step.
     """
 
     def __init__(
         self,
         k: int = 5,
         sampling_freq: int = 1,
-        max_series_for_dtw: int = 30,
-    ):
+        cache_dir: Path | None = None,
+    ) -> None:
+        self.sampling_freq = sampling_freq
+        self.cache_dir = cache_dir
         self.fidelity = FidelityMetrics(k=k)
         self.diversity = DiversityMetrics(k=k)
         self.privacy = PrivacyMetrics()
-        self.data_quality = DataQualityMetrics(
-            sampling_freq=sampling_freq, max_series=max_series_for_dtw
-        )
+
+    def _extract(self, X: np.ndarray) -> np.ndarray:
+        return extract_tsfel_features(X, self.sampling_freq, self.cache_dir)
 
     def compute_all_metrics(
         self,
@@ -209,16 +199,16 @@ class MetricsAggregator:
         X_lgta: np.ndarray,
         X_benchmark: np.ndarray,
     ) -> Dict[str, Dict[str, Dict[str, float]]]:
-        results: Dict[str, Dict[str, Dict[str, float]]] = {
-            "lgta": {},
-            "benchmark": {},
-        }
+        real_feats = self._extract(X_orig)
 
+        results: Dict[str, Dict[str, Dict[str, float]]] = {}
         for method, X_aug in [("lgta", X_lgta), ("benchmark", X_benchmark)]:
-            results[method]["fidelity"] = self.fidelity.compute(X_orig, X_aug)
-            results[method]["diversity"] = self.diversity.compute(X_orig, X_aug)
-            results[method]["privacy"] = self.privacy.compute(X_orig, X_aug)
-            results[method]["data_quality"] = self.data_quality.compute(X_orig, X_aug)
+            fake_feats = self._extract(X_aug)
+            results[method] = {
+                "fidelity": self.fidelity.compute(real_feats, fake_feats),
+                "diversity": self.diversity.compute(real_feats, fake_feats),
+                "privacy": self.privacy.compute(real_feats, fake_feats),
+            }
 
         return results
 
@@ -227,14 +217,16 @@ class MetricsAggregator:
         X_orig: np.ndarray,
         X_synthetic: np.ndarray,
     ) -> Dict[str, Dict[str, float]]:
-        """Compute fidelity, diversity, privacy, and data_quality for one (X_orig, X_synthetic) pair.
+        """Compute fidelity, diversity, and privacy for one pair.
 
-        Returns the same nested structure as one method entry from compute_all_metrics,
-        so callers can aggregate over multiple methods by calling this in a loop.
+        Returns the same nested structure as one method entry from
+        ``compute_all_metrics``.
         """
+        real_feats = self._extract(X_orig)
+        fake_feats = self._extract(X_synthetic)
+
         return {
-            "fidelity": self.fidelity.compute(X_orig, X_synthetic),
-            "diversity": self.diversity.compute(X_orig, X_synthetic),
-            "privacy": self.privacy.compute(X_orig, X_synthetic),
-            "data_quality": self.data_quality.compute(X_orig, X_synthetic),
+            "fidelity": self.fidelity.compute(real_feats, fake_feats),
+            "diversity": self.diversity.compute(real_feats, fake_feats),
+            "privacy": self.privacy.compute(real_feats, fake_feats),
         }
