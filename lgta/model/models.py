@@ -93,8 +93,51 @@ class TemporalSelfAttention(nn.Module):
         return x
 
 
+class ChannelSelfAttention(nn.Module):
+    """Self-attention over the channel (series) dimension.
+
+    At each timestep, the C input channels are treated as a sequence of C tokens
+    (each token is the scalar value scaled by a learned per-channel embedding).
+    This lets each series attend to other series, capturing cross-series structure.
+    Input and output shape: (B, T, C).
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        channel_embed_dim: int,
+        num_heads: int = 8,
+        dropout_rate: float = 0.1,
+    ):
+        super().__init__()
+        self.n_channels = n_channels
+        self.channel_embed_dim = channel_embed_dim
+        num_heads = _valid_num_heads(channel_embed_dim, num_heads)
+        self.channel_embed = nn.Parameter(torch.empty(n_channels, channel_embed_dim))
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=channel_embed_dim,
+            num_heads=num_heads,
+            batch_first=True,
+            dropout=dropout_rate,
+        )
+        self.proj_back = nn.Linear(channel_embed_dim, 1)
+        self.ln = nn.LayerNorm(n_channels)
+        self.drop = nn.Dropout(dropout_rate)
+        nn.init.xavier_uniform_(self.channel_embed)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.shape
+        tokens = x.unsqueeze(-1) * self.channel_embed.unsqueeze(0).unsqueeze(0)
+        tokens = tokens.view(B * T, C, -1)
+        attn_out, _ = self.self_attn(tokens, tokens, tokens)
+        attn_out = self.drop(attn_out)
+        out = self.proj_back(attn_out).squeeze(-1)
+        out = out.view(B, T, C)
+        return self.ln(x + out)
+
+
 class Encoder(nn.Module):
-    """BiLSTM encoder with self-attention.
+    """BiLSTM encoder with optional temporal and channel self-attention.
 
     Produces either a per-timestep latent code (B, W, latent_dim) in TEMPORAL
     mode, or a global vector (B, latent_dim) in GLOBAL mode via mean-pooling.
@@ -110,6 +153,8 @@ class Encoder(nn.Module):
         ff_dim: int = 256,
         dropout_rate: float = 0.3,
         latent_mode: LatentMode = LatentMode.TEMPORAL,
+        use_channel_attention: bool = False,
+        channel_embed_dim: int = 64,
     ):
         super().__init__()
         self.n_main_features = n_main_features
@@ -130,6 +175,16 @@ class Encoder(nn.Module):
             max_seq_len=window_size,
             rate=dropout_rate,
         )
+
+        self.use_channel_attention = use_channel_attention
+        self.channel_attention: ChannelSelfAttention | None = None
+        if use_channel_attention:
+            self.channel_attention = ChannelSelfAttention(
+                n_channels=n_main_features,
+                channel_embed_dim=channel_embed_dim,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+            )
 
         self.dropout = nn.Dropout(dropout_rate)
         self.dense_latent = nn.Linear(n_main_features, latent_dim)
@@ -154,6 +209,8 @@ class Encoder(nn.Module):
         h = self.ln_lstm(h)
 
         h = self.transformer(h)
+        if self.channel_attention is not None:
+            h = self.channel_attention(h)
         h = self.dropout(h)
 
         enc = F.relu(self.dense_latent(h))
@@ -398,6 +455,8 @@ def get_CVAE(
     encoder_type: EncoderType = EncoderType.FULL,
     spectral_norm: bool = False,
     latent_mode: LatentMode = LatentMode.TEMPORAL,
+    use_channel_attention: bool = False,
+    channel_embed_dim: int = 64,
 ) -> tuple[Encoder | SimpleEncoder, Decoder]:
     if encoder_type == EncoderType.SIMPLE:
         encoder: Encoder | SimpleEncoder = SimpleEncoder(
@@ -419,6 +478,8 @@ def get_CVAE(
             ff_dim=ff_dim,
             dropout_rate=dropout_rate,
             latent_mode=latent_mode,
+            use_channel_attention=use_channel_attention,
+            channel_embed_dim=channel_embed_dim,
         )
     decoder = Decoder(
         window_size=window_size,

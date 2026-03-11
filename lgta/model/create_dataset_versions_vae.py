@@ -352,6 +352,8 @@ class CreateTransformedVersionsCVAE:
         cyclical_kl_cycle_length: int = 50,
         equiv_weight: float = 0.0,
         latent_mode: LatentMode = LatentMode.TEMPORAL,
+        use_channel_attention: bool = False,
+        channel_embed_dim: int = 64,
     ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
         Training our CVAE on the dataset supplied.
@@ -383,6 +385,8 @@ class CreateTransformedVersionsCVAE:
             encoder_type=encoder_type,
             spectral_norm=spectral_norm,
             latent_mode=latent_mode,
+            use_channel_attention=use_channel_attention,
+            channel_embed_dim=channel_embed_dim,
         )
 
         cvae = CVAE(
@@ -400,9 +404,10 @@ class CreateTransformedVersionsCVAE:
             weights_folder = f"{self.input_dir}assets/model_weights"
         os.makedirs(weights_folder, exist_ok=True)
         suffix = f"_{self.weights_suffix}" if self.weights_suffix else ""
+        ch_suffix = "_chattn" if use_channel_attention else ""
         weights_file = os.path.join(
             weights_folder,
-            f"{self.dataset_name}_n{n_main_features}_w{self.window_size}_l{latent_dim}_vae_weights{suffix}.pt",
+            f"{self.dataset_name}_n{n_main_features}_w{self.window_size}_l{latent_dim}_vae_weights{ch_suffix}{suffix}.pt",
         )
 
         if os.path.exists(weights_file) and not hyper_tuning and load_weights:

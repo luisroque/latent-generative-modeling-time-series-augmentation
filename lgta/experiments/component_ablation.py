@@ -175,6 +175,7 @@ class ComponentAblationConfig:
     latent_mode: LatentMode = LatentMode.TEMPORAL
     equiv_weight: float = 0.0
     encoder_type: EncoderType = EncoderType.FULL
+    use_channel_attention: bool = False
     latent_dim: int = 4
     kl_weight_max: float = 0.1
     kl_anneal_epochs: int = 30
@@ -186,8 +187,9 @@ class ComponentAblationConfig:
 
     @property
     def model_key(self) -> str:
+        ch = "_chattn" if self.use_channel_attention else ""
         return (
-            f"{self.latent_mode.value}_enc{self.encoder_type.value}"
+            f"{self.latent_mode.value}_enc{self.encoder_type.value}{ch}"
             f"_eq{self.equiv_weight}_lat{self.latent_dim}"
             f"_kl{self.kl_weight_max}"
         )
@@ -218,6 +220,7 @@ class ComponentAblationResult:
     latent_mode: LatentMode
     equiv_weight: float
     encoder_type: EncoderType
+    use_channel_attention: bool
     recon_mse: float
     transformation_results: dict[str, TransformationResult]
 
@@ -391,7 +394,8 @@ def run_component_ablation(
             print(f"Training: {config.name}")
             print(f"  latent_mode={config.latent_mode.value}, "
                   f"equiv={config.equiv_weight}, "
-                  f"encoder={config.encoder_type.value}")
+                  f"encoder={config.encoder_type.value}, "
+                  f"channel_attn={config.use_channel_attention}")
             print(f"{'='*60}")
 
             model, _, _ = vae_creator.fit(
@@ -403,6 +407,7 @@ def run_component_ablation(
                 encoder_type=config.encoder_type,
                 equiv_weight=config.equiv_weight,
                 latent_mode=config.latent_mode,
+                use_channel_attention=config.use_channel_attention,
             )
             if X_orig is None:
                 X_orig = vae_creator.X_train_raw
@@ -432,6 +437,7 @@ def run_component_ablation(
             latent_mode=config.latent_mode,
             equiv_weight=config.equiv_weight,
             encoder_type=config.encoder_type,
+            use_channel_attention=config.use_channel_attention,
             recon_mse=recon_mse,
             transformation_results=transf_results,
         ))
@@ -784,6 +790,12 @@ STANDARD_CONFIGS: list[ComponentAblationConfig] = [
         latent_mode=LatentMode.TEMPORAL,
         equiv_weight=0.0,
         encoder_type=EncoderType.SIMPLE,
+    ),
+    ComponentAblationConfig(
+        name="F: Full + channel attn",
+        latent_mode=LatentMode.TEMPORAL,
+        equiv_weight=0.0,
+        use_channel_attention=True,
     ),
 ]
 
