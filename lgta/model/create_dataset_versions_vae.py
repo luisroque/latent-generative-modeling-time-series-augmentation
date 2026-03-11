@@ -354,6 +354,7 @@ class CreateTransformedVersionsCVAE:
         latent_mode: LatentMode = LatentMode.TEMPORAL,
         use_channel_attention: bool = False,
         channel_embed_dim: int = 64,
+        weights_suffix_override: str | None = None,
     ) -> tuple[CVAE, Optional[dict[str, list[float]]], float]:
         """
         Training our CVAE on the dataset supplied.
@@ -403,7 +404,12 @@ class CreateTransformedVersionsCVAE:
         else:
             weights_folder = f"{self.input_dir}assets/model_weights"
         os.makedirs(weights_folder, exist_ok=True)
-        suffix = f"_{self.weights_suffix}" if self.weights_suffix else ""
+        suffix_base = (
+            weights_suffix_override
+            if weights_suffix_override is not None
+            else self.weights_suffix
+        )
+        suffix = f"_{suffix_base}" if suffix_base else ""
         ch_suffix = "_chattn" if use_channel_attention else ""
         weights_file = os.path.join(
             weights_folder,

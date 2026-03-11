@@ -5,6 +5,9 @@ using a 2x2 matrix plus an encoder-type axis. Measures controllability,
 reconstruction quality, and transformation signature preservation.
 """
 
+from __future__ import annotations
+
+import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +33,54 @@ DEFAULT_ABLATION_DATASETS: list[tuple[str, str]] = [
 ]
 
 CACHE_ABLATION_ROOT = Path("assets/cache/component_ablation")
+
+
+def _results_cache_dir(dataset_name: str) -> Path:
+    return CACHE_ABLATION_ROOT / dataset_name / "results"
+
+
+def _load_cached_transformation_result(
+    cache_dir: Path,
+    model_key: str,
+    transformation: str,
+    sigma_values: list[float],
+    n_repetitions: int,
+) -> TransformationResult | None:
+    path = cache_dir / f"{_variant_slug(model_key)}_{transformation}.pkl"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        if (
+            data.get("sigma_values") == sigma_values
+            and data.get("n_repetitions") == n_repetitions
+        ):
+            return data["result"]
+    except (pickle.PickleError, KeyError):
+        pass
+    return None
+
+
+def _save_cached_transformation_result(
+    cache_dir: Path,
+    model_key: str,
+    transformation: str,
+    sigma_values: list[float],
+    n_repetitions: int,
+    result: TransformationResult,
+) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{_variant_slug(model_key)}_{transformation}.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(
+            {
+                "sigma_values": sigma_values,
+                "n_repetitions": n_repetitions,
+                "result": result,
+            },
+            f,
+        )
 
 
 def _variant_slug(name: str) -> str:
@@ -365,12 +416,15 @@ def run_component_ablation(
     plot_n_series: int = 6,
     plot_seed: int = 42,
     plot_per_sigma: bool = False,
+    use_cache: bool = True,
 ) -> list[ComponentAblationResult]:
     """Train each variant and evaluate across all transformations.
 
+    Models are saved under weights_dir with a unique suffix per config (model_key)
+    and loaded on subsequent runs when use_cache is True. Transformation
+    evaluation results are cached under assets/cache/component_ablation/<dataset>/results.
     If plots_output_dir is set, for each variant generates synthetic data
     and saves original-vs-synthetic plot(s) under plots_output_dir (no subfolders).
-    If weights_dir is set, model weights are saved under that path (per-dataset).
     If plot_per_sigma is False: one plot per variant using plot_synthetic_sigma.
     If plot_per_sigma is True: one plot per (variant, sigma) for each sigma in
     that variant's config.sigma_values, using plot_synthetic_transformation.
@@ -387,6 +441,7 @@ def run_component_ablation(
     results: list[ComponentAblationResult] = []
     X_orig: np.ndarray | None = None
     valid_mask: np.ndarray | None = None
+    results_cache_dir = _results_cache_dir(dataset_name) if use_cache else None
 
     for config in configs:
         if config.model_key not in trained_models:
@@ -403,11 +458,12 @@ def run_component_ablation(
                 latent_dim=config.latent_dim,
                 kl_anneal_epochs=config.kl_anneal_epochs,
                 kl_weight_max=config.kl_weight_max,
-                load_weights=False,
+                load_weights=use_cache,
                 encoder_type=config.encoder_type,
                 equiv_weight=config.equiv_weight,
                 latent_mode=config.latent_mode,
                 use_channel_attention=config.use_channel_attention,
+                weights_suffix_override=config.model_key,
             )
             if X_orig is None:
                 X_orig = vae_creator.X_train_raw
@@ -422,11 +478,35 @@ def run_component_ablation(
 
         transf_results: dict[str, TransformationResult] = {}
         for transf in ALL_TRANSFORMATIONS:
-            print(f"\n  Evaluating {config.name} / {transf}...")
-            transf_results[transf] = _evaluate_transformation(
-                config, model, z_mean, X_orig, vae_creator, transf,
-                valid_mask=valid_mask,
+            cached = (
+                _load_cached_transformation_result(
+                    results_cache_dir,
+                    config.model_key,
+                    transf,
+                    config.sigma_values,
+                    config.n_repetitions,
+                )
+                if results_cache_dir is not None
+                else None
             )
+            if cached is not None:
+                print(f"\n  Evaluating {config.name} / {transf}... (from cache)")
+                transf_results[transf] = cached
+            else:
+                print(f"\n  Evaluating {config.name} / {transf}...")
+                transf_results[transf] = _evaluate_transformation(
+                    config, model, z_mean, X_orig, vae_creator, transf,
+                    valid_mask=valid_mask,
+                )
+                if results_cache_dir is not None:
+                    _save_cached_transformation_result(
+                        results_cache_dir,
+                        config.model_key,
+                        transf,
+                        config.sigma_values,
+                        config.n_repetitions,
+                        transf_results[transf],
+                    )
             tr = transf_results[transf]
             print(f"    rho={tr.spearman_rho:.3f}  "
                   f"mono={'Y' if tr.is_monotonic else 'N'}  "
@@ -829,6 +909,11 @@ if __name__ == "__main__":
         default=Path("assets/results/component_ablation"),
         help="Base directory for results; each dataset gets a subfolder named by dataset (e.g. output_dir/tourism/).",
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable loading/saving of model weights and transformation results; train and evaluate from scratch.",
+    )
     args = parser.parse_args()
 
     base_output_dir = args.output_dir
@@ -852,6 +937,7 @@ if __name__ == "__main__":
             plots_output_dir=dataset_output_dir,
             weights_dir=weights_dir,
             plot_per_sigma=True,
+            use_cache=not args.no_cache,
         )
         plot_component_ablation(
             ablation_results,
