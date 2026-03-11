@@ -1598,6 +1598,13 @@ def _discover_result_dirs(
     return discovered
 
 
+def _slug_to_freq(config_slug: str) -> str:
+    """Extract frequency from config slug. Slug format: {dataset}_{freq}_w{N}_...
+    Returns empty string if slug has fewer than two parts (e.g. legacy)."""
+    parts = config_slug.split("_")
+    return parts[1] if len(parts) >= 2 else ""
+
+
 def _slug_to_dataset_and_variants(config_slug: str) -> tuple[str, str]:
     """Parse config slug into short dataset name and variant label (e.g. '3var' or '1var').
 
@@ -1616,7 +1623,7 @@ def _write_combined_summary(output_dir: Path) -> None:
     Reads downstream_results.json from each discovered result dir, computes
     % change vs Original per (dataset, eval_mode, dynamic_setting, forecaster),
     and writes COMBINED_RESULTS.md and COMBINED_RESULTS.csv with columns:
-    Dataset | Method | Variants | Dynamic | TSTR MASE | TSTR % | downstream_task MASE | downstream_task %.
+    Dataset | Freq | Method | Variants | Dynamic | TSTR MASE | TSTR % | downstream_task MASE | downstream_task %.
     """
     discovered = _discover_result_dirs(output_dir)
     if not discovered:
@@ -1688,7 +1695,7 @@ def _write_combined_summary(output_dir: Path) -> None:
         "",
     ]
     csv_rows: list[list[str]] = []
-    header = ["Dataset", "Method", "Variants", "Dynamic"]
+    header = ["Dataset", "Freq", "Method", "Variants", "Dynamic"]
     for mode in eval_modes:
         header.append(f"{mode} MASE")
         header.append(f"{mode} %")
@@ -1699,9 +1706,10 @@ def _write_combined_summary(output_dir: Path) -> None:
 
     for slug, dyn in slug_dyn_pairs:
         dataset_short, variants_label = _slug_to_dataset_and_variants(slug)
+        freq_label = _slug_to_freq(slug)
         dyn_label = _DYN_DISPLAY.get(dyn, dyn)
         for method in all_methods:
-            row_cells: list[str] = [dataset_short, method, variants_label, dyn_label]
+            row_cells: list[str] = [dataset_short, freq_label, method, variants_label, dyn_label]
             has_any = False
             for mode in eval_modes:
                 mase_str, pct_str = mase_and_pct(slug, dyn, mode, method, "LSTM")
@@ -1737,7 +1745,7 @@ def _write_resource_usage_summary(output_dir: Path) -> None:
             dir_by_slug_dyn[key] = dir_path
 
     _DYN_DISPLAY = {"with_dynamic": "Yes", "without_dynamic": "No"}
-    header = ["Dataset", "Method", "Variants", "Dynamic", "Time (s)", "Memory (MB)"]
+    header = ["Dataset", "Freq", "Method", "Variants", "Dynamic", "Time (s)", "Memory (MB)"]
     md_lines = [
         "# Resource Usage by Dataset and Augmentation Method",
         "",
@@ -1756,10 +1764,12 @@ def _write_resource_usage_summary(output_dir: Path) -> None:
         if not usages:
             continue
         dataset_short, variants_label = _slug_to_dataset_and_variants(slug)
+        freq_label = _slug_to_freq(slug)
         dyn_label = _DYN_DISPLAY.get(dyn, dyn)
         for u in usages:
             row = [
                 dataset_short,
+                freq_label,
                 u.method,
                 variants_label,
                 dyn_label,
