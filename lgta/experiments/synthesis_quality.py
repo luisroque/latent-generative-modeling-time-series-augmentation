@@ -80,6 +80,13 @@ def _run_synthesis_quality_for_config(
     return results_by_method
 
 
+NORMALIZE_KEYS: frozenset[str] = frozenset({
+    "fidelity.frechet_distance",
+    "fidelity.wasserstein_distance",
+    "fidelity.mmd",
+})
+
+
 def _flatten_for_json(
     results_by_method: dict[str, dict[str, dict[str, float]]],
 ) -> list[dict[str, Any]]:
@@ -97,6 +104,39 @@ def _flatten_for_json(
     return rows
 
 
+def _normalize_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add normalized (0–1) copies only for large-scale distance metrics.
+    Uses (v - min) / (max - min) so direction unchanged: lower raw → lower normalized (0 = best).
+    """
+    if not rows:
+        return rows
+    out = [dict(row) for row in rows]
+    for key in NORMALIZE_KEYS:
+        if key not in rows[0]:
+            continue
+        values = []
+        for row in rows:
+            v = row.get(key)
+            if isinstance(v, (int, float)) and not np.isnan(v):
+                values.append(float(v))
+        if not values:
+            continue
+        lo, hi = min(values), max(values)
+        for row, out_row in zip(rows, out):
+            v = row.get(key)
+            if not isinstance(v, (int, float)) or np.isnan(v):
+                out_row[f"{key}_norm"] = None
+                continue
+            v = float(v)
+            if hi <= lo:
+                out_row[f"{key}_norm"] = 0.0
+            else:
+                out_row[f"{key}_norm"] = (v - lo) / (hi - lo)
+    return out
+
+
 def _save_results(
     results_by_method: dict[str, dict[str, dict[str, float]]],
     output_dir: Path,
@@ -105,34 +145,147 @@ def _save_results(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     rows = _flatten_for_json(results_by_method)
+    rows = _normalize_rows(rows)
     json_path = output_dir / "synthesis_quality_results.json"
     with open(json_path, "w") as f:
         json.dump(rows, f, indent=2)
     print(f"Results saved to {json_path}")
 
+    if not rows:
+        md_path = output_dir / "SYNTHESIS_QUALITY_RESULTS.md"
+        md_path.write_text("# Synthesis Quality Results\n\nNo results.\n")
+        print(f"Markdown saved to {md_path}")
+        return
+
+    all_keys = [k for k in rows[0].keys() if k != "method" and not k.endswith("_norm")]
+    metric_keys = sorted(all_keys, key=lambda k: (k.split(".", 1)[0], k))
+    header = ["Method"] + metric_keys
+    sep = "|" + "|".join(["--------"] * len(header)) + "|"
     md_lines = [
         "# Synthesis Quality Results",
         "",
-        "Research question: Can L-GTA generate synthetic data with **greater privacy** "
-        "(higher authenticity) than benchmarks? Privacy (authenticity): higher = more privacy.",
+        "**How to read:** Frechet/Wasserstein/MMD are min–max normalized per run (0 = best, 1 = worst). "
+        "**Lower is better:** frechet_distance, wasserstein_distance, mmd. "
+        "**Higher is better:** improved_precision, density, cosine_similarity, improved_recall, coverage, authenticity. "
+        "Raw values in synthesis_quality_results.json.",
         "",
-        "| Method | authenticity (privacy) | improved_precision | density | improved_recall | coverage | ... |",
-        "|--------|-------------------------|---------------------|--------|-----------------|----------|-----|",
+        "| " + " | ".join(header) + " |",
+        sep,
     ]
-    for method, categories in results_by_method.items():
-        auth = categories.get("privacy", {}).get("authenticity", float("nan"))
-        fid = categories.get("fidelity", {})
-        div = categories.get("diversity", {})
-        prec = fid.get("improved_precision", float("nan"))
-        dens = fid.get("density", float("nan"))
-        rec = div.get("improved_recall", float("nan"))
-        cov = div.get("coverage", float("nan"))
-        md_lines.append(
-            f"| {method} | {auth:.4f} | {prec:.4f} | {dens:.4f} | {rec:.4f} | {cov:.4f} | ... |"
-        )
+    for row in rows:
+        method = row.get("method", "")
+        cells = [str(method)]
+        for k in metric_keys:
+            if k in NORMALIZE_KEYS and f"{k}_norm" in row:
+                v = row.get(f"{k}_norm")
+            else:
+                v = row.get(k)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                cells.append("—")
+            elif isinstance(v, float):
+                cells.append(f"{v:.4f}")
+            else:
+                cells.append(str(v))
+        md_lines.append("| " + " | ".join(cells) + " |")
     md_path = output_dir / "SYNTHESIS_QUALITY_RESULTS.md"
     md_path.write_text("\n".join(md_lines) + "\n")
     print(f"Markdown saved to {md_path}")
+
+
+def _write_overall_synthesis_quality_summary(output_dir: Path) -> None:
+    """Aggregate all synthesis_quality_results.json under output_dir: average each metric per method
+    across all runs (datasets/configs). Write OVERALL_SYNTHESIS_QUALITY.md and .json at output_dir root.
+    """
+    json_files = list(output_dir.rglob("synthesis_quality_results.json"))
+    if not json_files:
+        return
+
+    method_values: dict[str, dict[str, list[float]]] = {}
+    raw_keys: set[str] = set()
+
+    for path in json_files:
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, list):
+            continue
+        for row in data:
+            if not isinstance(row, dict) or "method" not in row:
+                continue
+            method = str(row["method"])
+            if method not in method_values:
+                method_values[method] = {}
+            for k, v in row.items():
+                if k == "method" or k.endswith("_norm"):
+                    continue
+                if isinstance(v, (int, float)) and not np.isnan(v):
+                    raw_keys.add(k)
+                    method_values[method].setdefault(k, []).append(float(v))
+
+    if not method_values or not raw_keys:
+        return
+
+    metric_keys = sorted(raw_keys, key=lambda k: (k.split(".", 1)[0], k))
+    agg_rows: list[dict[str, Any]] = []
+    for method in sorted(method_values.keys()):
+        row: dict[str, Any] = {"method": method}
+        for k in metric_keys:
+            vals = method_values[method].get(k)
+            if vals:
+                row[k] = float(np.mean(vals))
+            else:
+                row[k] = None
+        agg_rows.append(row)
+
+    out_json = output_dir / "OVERALL_SYNTHESIS_QUALITY.json"
+    with open(out_json, "w") as f:
+        json.dump(agg_rows, f, indent=2)
+    print(f"Overall synthesis quality (JSON) saved to {out_json}")
+
+    dist_keys = [k for k in metric_keys if k in NORMALIZE_KEYS]
+    dist_minmax: dict[str, tuple[float, float]] = {}
+    for k in dist_keys:
+        vals = [r[k] for r in agg_rows if r.get(k) is not None and not (isinstance(r[k], float) and np.isnan(r[k]))]
+        if vals:
+            dist_minmax[k] = (min(vals), max(vals))
+
+    header = ["Method"] + metric_keys
+    sep = "|" + "|".join(["--------"] * len(header)) + "|"
+    md_lines = [
+        "# Overall Synthesis Quality (averaged across all datasets/configs)",
+        "",
+        "**How to read:** Each value is the mean of that metric across all runs where the method appeared. "
+        "**Lower is better:** frechet_distance, wasserstein_distance, mmd. "
+        "**Higher is better:** improved_precision, density, cosine_similarity, improved_recall, coverage, authenticity. "
+        "Distance metrics below are min–max normalized across methods (0 = best, 1 = worst) for readability.",
+        "",
+        "| " + " | ".join(header) + " |",
+        sep,
+    ]
+
+    for row in agg_rows:
+        method = row.get("method", "")
+        cells = [str(method)]
+        for k in metric_keys:
+            v = row.get(k)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                cells.append("—")
+            elif k in dist_minmax:
+                lo, hi = dist_minmax[k]
+                if hi <= lo:
+                    cells.append("1.0000")
+                else:
+                    cells.append(f"{(float(v) - lo) / (hi - lo):.4f}")
+            elif isinstance(v, float):
+                cells.append(f"{v:.4f}")
+            else:
+                cells.append(str(v))
+        md_lines.append("| " + " | ".join(cells) + " |")
+
+    md_path = output_dir / "OVERALL_SYNTHESIS_QUALITY.md"
+    md_path.write_text("\n".join(md_lines) + "\n")
+    print(f"Overall synthesis quality (MD) saved to {md_path}")
 
 
 def _plot_authenticity(
@@ -189,6 +342,7 @@ def run_synthesis_quality(cfg: Any) -> dict[str, dict[str, dict[str, float]]]:
     )
     _save_results(results_by_method, effective_out)
     _plot_authenticity(results_by_method, effective_out)
+    _write_overall_synthesis_quality_summary(cfg.output_dir)
 
     auth_by_method = {
         m: results_by_method[m].get("privacy", {}).get("authenticity", float("nan"))
