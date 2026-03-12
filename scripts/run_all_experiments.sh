@@ -4,7 +4,7 @@ set -euo pipefail
 # Run all downstream forecasting experiments: all datasets (or selected ones),
 # single-var and 3var, for both TSTR and downstream_task, with and without
 # dynamic features. Then writes COMBINED_RESULTS. Afterwards runs the component
-# ablation study for the same dataset set.
+# ablation study and synthesis quality for the same dataset set.
 #
 # Usage:
 #   bash scripts/run_all_experiments.sh
@@ -21,6 +21,7 @@ PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 TS="$(date +%Y%m%d-%H%M%S)"
 RESULTS_DIR="${RESULTS_DIR:-$ROOT_DIR/assets/results/downstream_forecasting}"
 COMPONENT_ABLATION_DIR="${COMPONENT_ABLATION_DIR:-$ROOT_DIR/assets/results/component_ablation}"
+SYNTHESIS_QUALITY_DIR="${SYNTHESIS_QUALITY_DIR:-$ROOT_DIR/assets/results/synthesis_quality}"
 LOG_DIR="$RESULTS_DIR/logs"
 
 cd "$ROOT_DIR"
@@ -91,7 +92,7 @@ run_phase() {
   fi
 }
 
-echo "[run_all_experiments] Root: $ROOT_DIR | Downstream: $RESULTS_DIR | Ablation: $COMPONENT_ABLATION_DIR | Log: $LOG_DIR/run_all_experiments_$TS.log"
+echo "[run_all_experiments] Root: $ROOT_DIR | Downstream: $RESULTS_DIR | Ablation: $COMPONENT_ABLATION_DIR | Synthesis quality: $SYNTHESIS_QUALITY_DIR | Log: $LOG_DIR/run_all_experiments_$TS.log"
 echo "[run_all_experiments] Datasets: ${DATASETS[*]:-(all)}"
 echo "[run_all_experiments] Extra args: ${EXTRA_ARGS[*]:-(none)}"
 
@@ -137,7 +138,28 @@ echo "[run_all_experiments] Extra args: ${EXTRA_ARGS[*]:-(none)}"
     fi
     "${run_component_ablation_cmd[@]}"
   fi
+
+  echo ""
+  echo "[run_all_experiments] ========== Synthesis quality =========="
+  if ((${#DATASETS[@]} > 0)); then
+    for eval_mode in TSTR downstream_task; do
+      for d in "${DATASETS[@]}"; do
+        conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.synthesis_quality \
+          --output-dir "$SYNTHESIS_QUALITY_DIR" \
+          --dataset "$d" \
+          --eval-mode "$eval_mode"
+      done
+    done
+  else
+    for eval_mode in TSTR downstream_task; do
+      conda run --no-capture-output -n "$MAIN_ENV" python -u -m lgta.experiments.synthesis_quality \
+        --output-dir "$SYNTHESIS_QUALITY_DIR" \
+        --all-datasets \
+        --eval-mode "$eval_mode"
+    done
+  fi
 } 2>&1 | tee "$LOG_DIR/run_all_experiments_$TS.log"
 
 echo "[run_all_experiments] Done. Downstream results: $RESULTS_DIR (COMBINED_RESULTS.md / COMBINED_RESULTS.csv)"
 echo "[run_all_experiments] Component ablation results: $COMPONENT_ABLATION_DIR"
+echo "[run_all_experiments] Synthesis quality results: $SYNTHESIS_QUALITY_DIR (OVERALL_SYNTHESIS_QUALITY.md)"
