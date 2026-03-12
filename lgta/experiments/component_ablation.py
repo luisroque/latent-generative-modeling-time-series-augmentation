@@ -7,6 +7,7 @@ reconstruction quality, and transformation signature preservation.
 
 from __future__ import annotations
 
+import csv
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -635,14 +636,42 @@ def run_component_ablation(
     )
 
 
+ABLATION_CSV_COLUMNS: tuple[str, ...] = (
+    "Variant",
+    "Mean ρ",
+    "Monotonic %",
+    "Recon MSE",
+    "Mean FP dist",
+)
+
+
 def write_ablation_table_md(
     results: list[ComponentAblationResult],
     sigma_values: list[float],
     output_dir: Path,
 ) -> None:
-    """Write ablation_results.md with a table of all L-GTA variants (no benchmarks)."""
+    """Write ablation_results.csv and ablation_results.md with a table of all L-GTA variants (no benchmarks)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     sigma_str = ", ".join(str(s) for s in sigma_values)
+    csv_path = output_dir / "ablation_results.csv"
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(ABLATION_CSV_COLUMNS))
+        writer.writeheader()
+        for r in results:
+            rhos = [tr.spearman_rho for tr in r.transformation_results.values()]
+            monos = [tr.is_monotonic for tr in r.transformation_results.values()]
+            fp_dists = [tr.fingerprint_distance for tr in r.transformation_results.values()]
+            mean_rho = float(np.mean(rhos))
+            mono_pct = float(np.mean(monos)) * 100.0
+            mean_fp = float(np.mean(fp_dists))
+            writer.writerow({
+                "Variant": r.name,
+                "Mean ρ": f"{mean_rho:.4f}",
+                "Monotonic %": f"{mono_pct:.4f}",
+                "Recon MSE": f"{r.recon_mse:.4f}",
+                "Mean FP dist": f"{mean_fp:.4f}",
+            })
+    print(f"Saved: {csv_path}")
     lines = [
         "# Component Ablation Results (L-GTA variants)",
         "",
@@ -661,12 +690,112 @@ def write_ablation_table_md(
         lines.append(
             f"| {r.name} | {mean_rho:.4f} | {mono_pct:.1f}% | {r.recon_mse:.4f} | {mean_fp:.4f} |"
         )
-    out = output_dir / "ablation_results.md"
-    out.write_text("\n".join(lines) + "\n")
-    print(f"Saved: {out}")
+    md_path = output_dir / "ablation_results.md"
+    md_path.write_text("\n".join(lines) + "\n")
+    print(f"Saved: {md_path}")
+
+
+def _load_csv_rows(path: Path) -> list[dict[str, str]]:
+    """Load rows from a CSV file; returns empty list if file is missing or empty."""
+    if not path.exists():
+        return []
+    rows: list[dict[str, str]] = []
+    with path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(dict(row))
+    return rows
+
+
+def _to_float(value: str) -> float | None:
+    """Best-effort float parse: handles '—' and percent suffix."""
+    s = (value or "").strip()
+    if not s or s == "—":
+        return None
+    if s.endswith("%"):
+        s = s[:-1].strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def write_cross_dataset_ablation_summary(
+    base_output_dir: Path,
+    datasets: list[tuple[str, str]],
+) -> None:
+    """Aggregate ablation_results.csv across datasets and write a cross-dataset summary.
+
+    Averages metrics per variant over all (dataset, freq) pairs where that variant appears.
+    """
+    variant_to_metrics: dict[str, dict[str, list[float]]] = {}
+    for dataset_name, freq in datasets:
+        dir_path = base_output_dir / dataset_name / freq
+        rows = _load_csv_rows(dir_path / "ablation_results.csv")
+        if not rows:
+            continue
+        for row in rows:
+            variant = row.get("Variant")
+            if not variant:
+                continue
+            metrics = variant_to_metrics.setdefault(variant, {})
+            for key in ("Mean ρ", "Monotonic %", "Recon MSE", "Mean FP dist"):
+                val = _to_float(row.get(key, ""))
+                if val is None:
+                    continue
+                metrics.setdefault(key, []).append(val)
+
+    if not variant_to_metrics:
+        return
+
+    def fmt(x: float | None) -> str:
+        return f"{x:.4f}" if x is not None else "—"
+
+    cross_headers = ["Variant", "Mean ρ (avg)", "Monotonic % (avg)", "Recon MSE (avg)", "Mean FP dist (avg)", "Cells"]
+    summary_rows: list[tuple[str, float | None, float | None, float | None, float | None, int]] = []
+    for variant in sorted(variant_to_metrics.keys()):
+        m = variant_to_metrics[variant]
+        cells_count = max(len(v) for v in m.values()) if m else 0
+        mean_rho = (sum(m["Mean ρ"]) / len(m["Mean ρ"])) if m.get("Mean ρ") else None
+        mono = (sum(m["Monotonic %"]) / len(m["Monotonic %"])) if m.get("Monotonic %") else None
+        recon = (sum(m["Recon MSE"]) / len(m["Recon MSE"])) if m.get("Recon MSE") else None
+        fp = (sum(m["Mean FP dist"]) / len(m["Mean FP dist"])) if m.get("Mean FP dist") else None
+        summary_rows.append((variant, mean_rho, mono, recon, fp, cells_count))
+
+    csv_out = base_output_dir / "CROSS_DATASET_ABLATION.csv"
+    with csv_out.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cross_headers)
+        w.writeheader()
+        for variant, mean_rho, mono, recon, fp, cells_count in summary_rows:
+            w.writerow({
+                "Variant": variant,
+                "Mean ρ (avg)": fmt(mean_rho) if mean_rho is not None else "",
+                "Monotonic % (avg)": fmt(mono) if mono is not None else "",
+                "Recon MSE (avg)": fmt(recon) if recon is not None else "",
+                "Mean FP dist (avg)": fmt(fp) if fp is not None else "",
+                "Cells": str(cells_count),
+            })
+    print(f"Saved: {csv_out}")
+
+    lines: list[str] = [
+        "# Cross-dataset Component Ablation Summary",
+        "",
+        "Metrics are averaged over all (dataset, freq) pairs where a variant appears.",
+        "",
+        "| " + " | ".join(cross_headers) + " |",
+        "|---------|--------------|-------------------|-----------------|---------------------|-------|",
+    ]
+    for variant, mean_rho, mono, recon, fp, cells_count in summary_rows:
+        lines.append(
+            f"| {variant} | {fmt(mean_rho)} | {fmt(mono)} | {fmt(recon)} | {fmt(fp)} | {cells_count} |"
+        )
+    md_out = base_output_dir / "CROSS_DATASET_ABLATION.md"
+    md_out.write_text("\n".join(lines) + "\n")
+    print(f"Saved: {md_out}")
 
 
 FULL_LGTA_CONFIG_NAME = "D: Full L-GTA"
+FULL_LGTA_NODYN_CONFIG_NAME = "G: Full L-GTA, no dynamic"
 COMPARISON_SIGMA = 2.0
 BENCHMARK_SEED = 42
 
@@ -795,25 +924,50 @@ def write_comparison_table_md(
         )
         return
 
+    full_lgta_nodyn_result = next(
+        (r for r in results if r.name == FULL_LGTA_NODYN_CONFIG_NAME),
+        None,
+    )
+    full_lgta_nodyn_config = next(
+        (c for c in configs if c.name == FULL_LGTA_NODYN_CONFIG_NAME),
+        None,
+    )
+
     sampling_freq = FREQ_TO_SAMPLING_FREQ.get(freq.upper().strip(), 1)
     feature_cache = DOWNSTREAM_CACHE_ROOT / f"{dataset_name}_{freq}" / "tsfel_features"
     aggregator = MetricsAggregator(
         sampling_freq=sampling_freq, cache_dir=feature_cache
     )
 
-    lgta_source = _try_load_downstream_lgta(dataset_name, freq)
-    if lgta_source is not None:
-        model, z_mean, vae_creator = lgta_source
+    downstream_lgta = _try_load_downstream_lgta(dataset_name, freq)
+    if downstream_lgta is not None:
         print("  Using L-GTA weights from downstream cache (no dynamic, 3var)")
-    else:
+
+    def _lgta_model_for_dynamic() -> tuple[torch.nn.Module, np.ndarray, object]:
+        if full_lgta_config.model_key in trained_models:
+            model, z_mean, _, vae_creator = trained_models[full_lgta_config.model_key]
+            return (model, z_mean, vae_creator)
+        if downstream_lgta is not None:
+            return downstream_lgta
         model, z_mean, _, vae_creator = trained_models[full_lgta_config.model_key]
+        return (model, z_mean, vae_creator)
+
+    def _lgta_model_for_nodyn() -> tuple[torch.nn.Module, np.ndarray, object] | None:
+        if full_lgta_nodyn_config is not None and full_lgta_nodyn_config.model_key in trained_models:
+            model, z_mean, _, vae_creator = trained_models[full_lgta_nodyn_config.model_key]
+            return (model, z_mean, vae_creator)
+        if downstream_lgta is not None:
+            return downstream_lgta
+        return None
+
     rng = np.random.default_rng(BENCHMARK_SEED)
+    model_dyn, z_mean_dyn, vae_creator_dyn = _lgta_model_for_dynamic()
     lgta_flat_list: list[dict[str, float]] = []
     for transformation in COMPARISON_VARIANT_TRANSFORMATIONS:
         X_lgta = generate_synthetic_data(
-            model,
-            z_mean,
-            vae_creator,
+            model_dyn,
+            z_mean_dyn,
+            vae_creator_dyn,
             transformation,
             [COMPARISON_SIGMA],
             latent_mode=LatentMode.TEMPORAL,
@@ -828,7 +982,31 @@ def write_comparison_table_md(
         for k in lgta_flat_list[0]:
             lgta_avg_flat[k] = float(np.nanmean([f[k] for f in lgta_flat_list]))
 
-    X_orig_scaled = vae_creator.scaler_target.transform(X_orig)
+    lgta_nodyn_avg_flat: dict[str, float] = {}
+    nodyn_source = _lgta_model_for_nodyn()
+    if nodyn_source is not None:
+        model_nodyn, z_mean_nodyn, vae_creator_nodyn = nodyn_source
+        rng_nodyn = np.random.default_rng(BENCHMARK_SEED)
+        lgta_nodyn_flat_list: list[dict[str, float]] = []
+        for transformation in COMPARISON_VARIANT_TRANSFORMATIONS:
+            X_lgta = generate_synthetic_data(
+                model_nodyn,
+                z_mean_nodyn,
+                vae_creator_nodyn,
+                transformation,
+                [COMPARISON_SIGMA],
+                latent_mode=LatentMode.TEMPORAL,
+                rng=rng_nodyn,
+            )
+            if valid_mask is not None:
+                X_lgta = X_lgta * valid_mask.astype(np.float32)
+            metrics = aggregator.compute_metrics_single(X_orig, X_lgta)
+            lgta_nodyn_flat_list.append(_flatten_metrics(metrics))
+        if lgta_nodyn_flat_list:
+            for k in lgta_nodyn_flat_list[0]:
+                lgta_nodyn_avg_flat[k] = float(np.nanmean([f[k] for f in lgta_nodyn_flat_list]))
+
+    X_orig_scaled = vae_creator_dyn.scaler_target.transform(X_orig)
     direct_flat_list: list[dict[str, float]] = []
     for transformation in COMPARISON_VARIANT_TRANSFORMATIONS:
         X_direct_scaled = ManipulateData(
@@ -836,7 +1014,7 @@ def write_comparison_table_md(
             transformation=transformation,
             parameters=[COMPARISON_SIGMA],
         ).apply_transf()
-        X_direct = vae_creator.scaler_target.inverse_transform(X_direct_scaled)
+        X_direct = vae_creator_dyn.scaler_target.inverse_transform(X_direct_scaled)
         if valid_mask is not None:
             X_direct = X_direct * valid_mask.astype(np.float32)
         metrics = aggregator.compute_metrics_single(X_orig, X_direct)
@@ -849,6 +1027,8 @@ def write_comparison_table_md(
     synthetic_by_method: dict[str, dict[str, float]] = {}
     if lgta_avg_flat:
         synthetic_by_method[f"Full L-GTA (3var, σ={COMPARISON_SIGMA})"] = lgta_avg_flat
+    if lgta_nodyn_avg_flat:
+        synthetic_by_method[f"Full L-GTA, no dynamic (3var, σ={COMPARISON_SIGMA})"] = lgta_nodyn_avg_flat
     if direct_avg_flat:
         synthetic_by_method[f"Direct (3var, σ={COMPARISON_SIGMA})"] = direct_avg_flat
 
@@ -900,9 +1080,23 @@ def write_comparison_table_md(
             for tr in full_lgta_result.transformation_results.values()
         ])
     ) * 100.0
+    if full_lgta_nodyn_result is not None:
+        full_lgta_nodyn_rho_mean = float(
+            np.mean([tr.spearman_rho for tr in full_lgta_nodyn_result.transformation_results.values()])
+        )
+        full_lgta_nodyn_mono_pct = float(
+            np.mean([
+                tr.is_monotonic
+                for tr in full_lgta_nodyn_result.transformation_results.values()
+            ])
+        ) * 100.0
+    else:
+        full_lgta_nodyn_rho_mean = float("nan")
+        full_lgta_nodyn_mono_pct = float("nan")
 
     method_order = [
         f"Full L-GTA (3var, σ={COMPARISON_SIGMA})",
+        f"Full L-GTA, no dynamic (3var, σ={COMPARISON_SIGMA})",
         f"Direct (3var, σ={COMPARISON_SIGMA})",
         "TimeGANGenerator (3var)",
         "TimeVAEGenerator (3var)",
@@ -915,8 +1109,11 @@ def write_comparison_table_md(
             flat = synthetic_by_method[method]
             if not all_metric_keys:
                 all_metric_keys = sorted(flat.keys())
-            if "Full L-GTA" in method:
-                mean_rho: str | float = full_lgta_rho_mean
+            if method == f"Full L-GTA, no dynamic (3var, σ={COMPARISON_SIGMA})":
+                mean_rho = full_lgta_nodyn_rho_mean if not np.isnan(full_lgta_nodyn_rho_mean) else "—"
+                mono_pct = full_lgta_nodyn_mono_pct if not np.isnan(full_lgta_nodyn_mono_pct) else "—"
+            elif "Full L-GTA" in method:
+                mean_rho = full_lgta_rho_mean
                 mono_pct = full_lgta_mono_pct
             else:
                 mean_rho = direct_rho_mean
@@ -938,7 +1135,51 @@ def write_comparison_table_md(
             row[k] = flat.get(k, float("nan"))
         rows.append(row)
 
+    DISTANCE_METRIC_KEYS = frozenset({
+        "fidelity.frechet_distance",
+        "fidelity.wasserstein_distance",
+        "fidelity.mmd",
+    })
+    distance_keys_in_table = [k for k in all_metric_keys if k in DISTANCE_METRIC_KEYS]
+    min_max: dict[str, tuple[float, float]] = {}
+    for k in distance_keys_in_table:
+        values = [
+            row[k] for row in rows
+            if isinstance(row.get(k), (int, float))
+            and not np.isnan(float(row[k]))
+        ]
+        if values:
+            min_max[k] = (min(values), max(values))
+
     header = ["Method", "Mean ρ", "Monotonic %"] + all_metric_keys
+    csv_path = output_dir / "comparison_results.csv"
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        writer.writeheader()
+        for row in rows:
+            csv_row: dict[str, str] = {}
+            for h in header:
+                v = row.get(h, "")
+                if v == "—":
+                    csv_row[h] = ""
+                elif isinstance(v, float):
+                    if np.isnan(v):
+                        csv_row[h] = ""
+                    elif h == "Monotonic %":
+                        csv_row[h] = f"{v:.4f}"
+                    elif h in min_max:
+                        lo, hi = min_max[h]
+                        if hi <= lo:
+                            norm = 0.0
+                        else:
+                            norm = (float(v) - lo) / (hi - lo)
+                        csv_row[h] = f"{norm:.4f}"
+                    else:
+                        csv_row[h] = f"{v:.4f}"
+                else:
+                    csv_row[h] = str(v)
+            writer.writerow(csv_row)
+    print(f"Saved: {csv_path}")
     lines = [
         "# Comparison: Full L-GTA vs benchmarks (all methods 3var)",
         "",
@@ -946,8 +1187,9 @@ def write_comparison_table_md(
         "L-GTA and Direct use 3 variants (one per transformation: "
         f"{', '.join(COMPARISON_VARIANT_TRANSFORMATIONS)}) at σ={COMPARISON_SIGMA}; "
         "TimeGAN, TimeVAE, Diffusion-TS use 3 samples each. "
-        "Mean ρ / Monotonic % from ablation (L-GTA and Direct only); benchmarks have no σ-sweep (generate vs original only), so —."
-        "Metrics averaged over variants/samples.",
+        "Mean ρ / Monotonic % from ablation (L-GTA and Direct only); benchmarks have no σ-sweep (generate vs original only), so —. "
+        "Metrics averaged over variants/samples. "
+        "**Distance metrics** (Fr\u00e9chet, Wasserstein, MMD) are min\u2013max normalized per dataset (0 = best, 1 = worst).",
         "",
         "| " + " | ".join(header) + " |",
         "| " + " | ".join("---" for _ in header) + " |",
@@ -963,15 +1205,129 @@ def write_comparison_table_md(
                     cells.append("—")
                 elif h == "Monotonic %":
                     cells.append(f"{v:.1f}%")
+                elif h in min_max:
+                    lo, hi = min_max[h]
+                    if hi <= lo:
+                        norm = 0.0
+                    else:
+                        norm = (float(v) - lo) / (hi - lo)
+                    cells.append(f"{norm:.4f}")
                 else:
                     cells.append(f"{v:.4f}")
             else:
                 cells.append(str(v))
         lines.append("| " + " | ".join(cells) + " |")
 
-    out = output_dir / "comparison_results.md"
-    out.write_text("\n".join(lines) + "\n")
-    print(f"Saved: {out}")
+    md_path = output_dir / "comparison_results.md"
+    md_path.write_text("\n".join(lines) + "\n")
+    print(f"Saved: {md_path}")
+
+
+def write_cross_dataset_comparison_summary(
+    base_output_dir: Path,
+    datasets: list[tuple[str, str]],
+) -> None:
+    """Aggregate comparison_results.csv across datasets and write a cross-dataset summary.
+
+    Averages each metric per method over all (dataset, freq) pairs where it appears.
+    """
+    method_to_metrics: dict[str, dict[str, list[float]]] = {}
+    all_metric_keys: set[str] = set()
+
+    for dataset_name, freq in datasets:
+        dir_path = base_output_dir / dataset_name / freq
+        rows = _load_csv_rows(dir_path / "comparison_results.csv")
+        if not rows:
+            continue
+        # Header inferred from first data row; keys we care about are numeric.
+        for row in rows:
+            method = row.get("Method")
+            if not method:
+                continue
+            metrics = method_to_metrics.setdefault(method, {})
+            for key, value in row.items():
+                if key in {"Method"}:
+                    continue
+                val = _to_float(value)
+                if val is None:
+                    continue
+                metrics.setdefault(key, []).append(val)
+                all_metric_keys.add(key)
+
+    if not method_to_metrics:
+        return
+
+    ordered_methods = sorted(method_to_metrics.keys())
+    ordered_metrics = sorted(all_metric_keys)
+    csv_headers = ["Method"] + [f"{k} (avg)" for k in ordered_metrics]
+
+    csv_out = base_output_dir / "CROSS_DATASET_COMPARISON.csv"
+    with csv_out.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=csv_headers)
+        w.writeheader()
+        for method in ordered_methods:
+            metrics = method_to_metrics[method]
+            row: dict[str, str] = {"Method": method}
+            for key in ordered_metrics:
+                vals = metrics.get(key, [])
+                if not vals:
+                    row[f"{key} (avg)"] = ""
+                else:
+                    avg_val = sum(vals) / len(vals)
+                    row[f"{key} (avg)"] = f"{avg_val:.4f}"
+            w.writerow(row)
+    print(f"Saved: {csv_out}")
+
+    normalized_metrics = (
+        "fidelity.frechet_distance",
+        "fidelity.wasserstein_distance",
+        "fidelity.mmd",
+    )
+    higher_better = (
+        "Mean ρ",
+        "Monotonic %",
+        "diversity.coverage",
+        "diversity.improved_recall",
+        "fidelity.cosine_similarity",
+        "fidelity.density",
+        "fidelity.improved_precision",
+        "privacy.authenticity",
+    )
+    lines: list[str] = [
+        "# Cross-dataset Metrics Comparison Summary",
+        "",
+        "Metrics are averaged over all (dataset, freq) pairs where a method appears.",
+        "",
+        "**Normalized metrics (min–max per dataset, 0 = best, 1 = worst):** "
+        + f"`{'`, `'.join(normalized_metrics)}`. All other columns are raw (pymdma or computed values).",
+        "",
+        "**Direction (what is better):**",
+        "- **Higher is better:** " + ", ".join(higher_better) + ".",
+        "- **Lower is better:** "
+        + ", ".join(normalized_metrics)
+        + " (after normalization: 0 = best, 1 = worst).",
+        "",
+        "| " + " | ".join(csv_headers) + " |",
+        "|--------|" + "|".join(["-----------"] * len(ordered_metrics)) + "|",
+    ]
+    for method in ordered_methods:
+        metrics = method_to_metrics[method]
+        cells: list[str] = [method]
+        for key in ordered_metrics:
+            vals = metrics.get(key, [])
+            if not vals:
+                cells.append("—")
+            else:
+                avg_val = sum(vals) / len(vals)
+                if "Monotonic %" in key:
+                    cells.append(f"{avg_val:.1f}%")
+                else:
+                    cells.append(f"{avg_val:.4f}")
+        lines.append("| " + " | ".join(cells) + " |")
+
+    md_out = base_output_dir / "CROSS_DATASET_COMPARISON.md"
+    md_out.write_text("\n".join(lines) + "\n")
+    print(f"Saved: {md_out}")
 
 
 def plot_component_ablation(
@@ -1235,10 +1591,26 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable loading/saving of model weights and transformation results; train and evaluate from scratch.",
     )
+    parser.add_argument(
+        "--comparison-only",
+        action="store_true",
+        help="Only run the comparison table step (TSFEL/pymdma metrics and comparison_results.csv/.md). Loads ablation from cache; use after ablation has already been run.",
+    )
+    parser.add_argument(
+        "--summaries-only",
+        action="store_true",
+        help="Only write cross-dataset summaries (CROSS_DATASET_ABLATION and CROSS_DATASET_COMPARISON) from existing per-dataset CSV files. No training or per-dataset runs.",
+    )
     args = parser.parse_args()
 
     base_output_dir = args.output_dir
     base_output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.summaries_only:
+        write_cross_dataset_ablation_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
+        write_cross_dataset_comparison_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
+        raise SystemExit(0)
+
     CACHE_ABLATION_ROOT.mkdir(parents=True, exist_ok=True)
 
     def run_one(dataset_name: str, freq: str) -> None:
@@ -1255,17 +1627,18 @@ if __name__ == "__main__":
             STANDARD_CONFIGS,
             dataset_name=dataset_name,
             freq=freq,
-            plots_output_dir=dataset_output_dir,
+            plots_output_dir=None if args.comparison_only else dataset_output_dir,
             weights_dir=weights_dir,
-            plot_per_sigma=True,
+            plot_per_sigma=not args.comparison_only,
             use_cache=not args.no_cache,
         )
-        plot_component_ablation(
-            run_result.results,
-            STANDARD_CONFIGS[0].sigma_values,
-            dataset_output_dir,
-        )
-        print_component_ablation_report(run_result.results)
+        if not args.comparison_only:
+            plot_component_ablation(
+                run_result.results,
+                STANDARD_CONFIGS[0].sigma_values,
+                dataset_output_dir,
+            )
+            print_component_ablation_report(run_result.results)
         write_comparison_table_md(
             run_result,
             STANDARD_CONFIGS,
@@ -1277,6 +1650,8 @@ if __name__ == "__main__":
     if args.all_datasets:
         for dataset_name, freq in DEFAULT_ABLATION_DATASETS:
             run_one(dataset_name, freq)
+        write_cross_dataset_ablation_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
+        write_cross_dataset_comparison_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
     else:
         dataset_name = args.dataset if args.dataset is not None else "tourism"
         freq = args.freq

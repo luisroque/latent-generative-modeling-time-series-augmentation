@@ -1960,11 +1960,22 @@ def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None
             return None
         return sum(vals) / len(vals)
 
+    def std_mase(method: str) -> float | None:
+        vals = method_to_combined_mase.get(method) or []
+        if not vals:
+            return None
+        if len(vals) == 1:
+            return 0.0
+        mean_val = sum(vals) / len(vals)
+        var = sum((v - mean_val) ** 2 for v in vals) / len(vals)
+        return var**0.5
+
     all_methods = sorted(method_to_combined_mase.keys())
     method_rows = [
         (
             m,
             mean_mase(m),
+            std_mase(m),
             method_to_wins_tstr.get(m, 0),
             method_to_wins_downstream.get(m, 0),
             method_to_wins_either.get(m, 0),
@@ -1988,10 +1999,15 @@ def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None
             lgta_config_to_combined_mase.setdefault(key, []).append(
                 (tstr_mase + down_mase) / 2.0
             )
-    lgta_config_rows = [
-        (var, dyn, sum(v) / len(v), len(v))
-        for (var, dyn), v in lgta_config_to_combined_mase.items()
-    ]
+    lgta_config_rows: list[tuple[str, str, float, float, int]] = []
+    for (var, dyn), values in lgta_config_to_combined_mase.items():
+        mean_val = sum(values) / len(values)
+        if len(values) == 1:
+            std_val = 0.0
+        else:
+            var = sum((x - mean_val) ** 2 for x in values) / len(values)
+            std_val = var**0.5
+        lgta_config_rows.append((var, dyn, mean_val, std_val, len(values)))
     lgta_config_rows.sort(key=lambda x: x[2])
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2000,26 +2016,28 @@ def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None
         "# Aggregated Summary: Downstream Forecasting",
         "",
         "**Mean MASE** = average over cells of (TSTR MASE + downstream_task MASE) / 2. "
+        "**Std MASE** = standard deviation of the combined MASE across cells. "
         "**Win rate** = share of cells where the method ranks 1st (lower MASE). "
         "The method table below uses only **3var, no dynamic** cells.",
         "",
         "## Mean MASE by method (3var, no dynamic)",
         "",
-        "| Method | Mean MASE | 1st in TSTR | 1st in downstream | 1st in either |",
-        "|--------|-----------|-------------|--------------------|---------------|",
+        "| Method | Mean MASE | Std MASE | 1st in TSTR | 1st in downstream | 1st in either |",
+        "|--------|-----------|----------|-------------|--------------------|---------------|",
     ]
-    for m, avg, w_t, w_d, w_e in method_rows:
+    for m, avg, std, w_t, w_d, w_e in method_rows:
         avg_str = f"{avg:.4f}" if avg is not None else "—"
+        std_str = f"{std:.4f}" if std is not None else "—"
         md_lines.append(
-            f"| {m} | {avg_str} | {w_t}/{n_cells} | {w_d}/{n_cells} | {w_e}/{n_cells} |"
+            f"| {m} | {avg_str} | {std_str} | {w_t}/{n_cells} | {w_d}/{n_cells} | {w_e}/{n_cells} |"
         )
     md_lines.append("")
     md_lines.append("## LGTA: mean MASE by configuration")
     md_lines.append("")
-    md_lines.append("| Variants | Dynamic | Mean MASE | Cells |")
-    md_lines.append("|---------|--------|-----------|-------|")
-    for var, dyn, avg, count in lgta_config_rows:
-        md_lines.append(f"| {var} | {dyn} | {avg:.4f} | {count} |")
+    md_lines.append("| Variants | Dynamic | Mean MASE | Std MASE | Cells |")
+    md_lines.append("|---------|--------|-----------|----------|-------|")
+    for var, dyn, avg, std, count in lgta_config_rows:
+        md_lines.append(f"| {var} | {dyn} | {avg:.4f} | {std:.4f} | {count} |")
     md_lines.append("")
     best_method = method_rows[0]
     best_lgta = lgta_config_rows[0] if lgta_config_rows else None

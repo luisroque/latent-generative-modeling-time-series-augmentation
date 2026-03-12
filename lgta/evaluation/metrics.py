@@ -34,11 +34,141 @@ warnings.filterwarnings("ignore")
 _TSFEL_CFG = tsfel.get_features_by_domain()
 
 
+# Explicit TSFEL feature sets per domain. Using fixed lists avoids duplicate-label
+# and other TSFEL/pandas issues and makes the used feature set visible in code.
+# Bump _FEATURE_CONFIG_VERSION below if any of these lists change.
+
+TSFEL_STATISTICAL_FEATURES: tuple[str, ...] = (
+    "Absolute energy",
+    "Average power",
+    "ECDF",
+    "ECDF Percentile",
+    "ECDF Percentile Count",
+    "Entropy",
+    "Histogram mode",
+    "Interquartile range",
+    "Kurtosis",
+    "Max",
+    "Mean",
+    "Mean absolute deviation",
+    "Median",
+    "Median absolute deviation",
+    "Min",
+    "Peak to peak distance",
+    "Root mean square",
+    "Skewness",
+    "Standard deviation",
+    "Variance",
+)
+
+TSFEL_TEMPORAL_FEATURES: tuple[str, ...] = (
+    "Area under the curve",
+    "Autocorrelation",
+    "Centroid",
+    "Lempel-Ziv complexity",
+    "Mean absolute diff",
+    "Mean diff",
+    "Median absolute diff",
+    "Median diff",
+    "Negative turning points",
+    "Neighbourhood peaks",
+    "Positive turning points",
+    "Signal distance",
+    "Slope",
+    "Sum absolute diff",
+    "Zero crossing rate",
+)
+
+TSFEL_SPECTRAL_FEATURES: tuple[str, ...] = (
+    "Fundamental frequency",
+    "Human range energy",
+    "LPCC",
+    "MFCC",
+    "Max power spectrum",
+    "Maximum frequency",
+    "Median frequency",
+    "Power bandwidth",
+    "Spectral centroid",
+    "Spectral decrease",
+    "Spectral distance",
+    "Spectral entropy",
+    "Spectral kurtosis",
+    "Spectral positive turning points",
+    "Spectral roll-off",
+    "Spectral roll-on",
+    "Spectral skewness",
+    "Spectral slope",
+    "Spectral spread",
+    "Spectral variation",
+    "Spectrogram mean coefficient",
+    "Wavelet entropy",
+)
+
+
+def _get_feature_names_from_cfg(cfg: dict) -> list[str]:
+    """Return sorted list of feature names from a TSFEL domain config (e.g. {'statistical': {name: params}})."""
+    names: list[str] = []
+    for domain_key, inner in cfg.items():
+        if isinstance(inner, dict):
+            names.extend(inner.keys())
+    return sorted(set(names))
+
+
+def _build_domain_configs() -> dict[str, dict]:
+    """Build TSFEL configs per domain using explicit feature lists (no probing, no duplicates)."""
+    cfgs: dict[str, dict] = {}
+
+    stat_full = tsfel.get_features_by_domain("statistical")
+    stat_all = stat_full.get("statistical", {})
+    cfgs["statistical"] = {
+        "statistical": {
+            name: stat_all[name]
+            for name in TSFEL_STATISTICAL_FEATURES
+            if name in stat_all
+        }
+    }
+
+    temp_full = tsfel.get_features_by_domain("temporal")
+    temp_all = temp_full.get("temporal", {})
+    cfgs["temporal"] = {
+        "temporal": {
+            name: temp_all[name]
+            for name in TSFEL_TEMPORAL_FEATURES
+            if name in temp_all
+        }
+    }
+
+    spec_full = tsfel.get_features_by_domain("spectral")
+    spec_all = spec_full.get("spectral", {})
+    cfgs["spectral"] = {
+        "spectral": {
+            name: spec_all[name]
+            for name in TSFEL_SPECTRAL_FEATURES
+            if name in spec_all
+        }
+    }
+
+    print("[TSFEL] Feature sets by domain (no duplicates):", flush=True)
+    for domain in ("statistical", "temporal", "spectral"):
+        names = _get_feature_names_from_cfg(cfgs[domain])
+        print(f"  {domain}: {len(names)} features", flush=True)
+        for n in names:
+            print(f"    - {n}", flush=True)
+    return cfgs
+
+
+_TSFEL_CFG_BY_DOMAIN: dict[str, dict] = _build_domain_configs()
+
+
+_FEATURE_CONFIG_VERSION = "v2"  # bump when TSFEL feature set changes
+
+
 def _feature_cache_key(X: np.ndarray, sampling_freq: int) -> str:
-    """Deterministic hash from array content, shape, and sampling frequency."""
+    """Deterministic hash from array content, shape, sampling frequency, and feature config version."""
     h = hashlib.sha256()
     h.update(X.tobytes())
     h.update(f"{X.shape}|{sampling_freq}".encode())
+    h.update(_FEATURE_CONFIG_VERSION.encode())
     return h.hexdigest()[:16]
 
 
@@ -78,12 +208,44 @@ def extract_tsfel_features(
             return np.load(cache_path)
 
     feature_rows: list[np.ndarray] = []
+    domains: list[str] = ["statistical", "temporal", "spectral"]
+
     for i in range(X.shape[1]):
         series = pd.DataFrame(X[:, i], columns=["value"])
-        feats = tsfel.time_series_features_extractor(
-            _TSFEL_CFG, series, fs=sampling_freq, verbose=0
-        )
-        feature_rows.append(feats.values[0])
+
+        per_domain_feats: list[np.ndarray] = []
+        for domain in domains:
+            cfg = _TSFEL_CFG_BY_DOMAIN.get(domain)
+            if not cfg:
+                continue
+            try:
+                feats_df = tsfel.time_series_features_extractor(
+                    cfg, series, fs=sampling_freq, verbose=0
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                print(
+                    f"[TSFEL] Skipping domain '{domain}' for series {i} due to error: {exc}"
+                )
+                continue
+
+            # Drop duplicate columns within this domain to avoid pandas
+            # reindexing errors and log when this happens so we can monitor it.
+            if feats_df.columns.duplicated().any():  # pragma: no cover - rare
+                n_dup = int(feats_df.columns.duplicated().sum())
+                print(
+                    f"[TSFEL] Dropping {n_dup} duplicate feature columns in "
+                    f"domain '{domain}' for series {i}."
+                )
+                feats_df = feats_df.loc[:, ~feats_df.columns.duplicated()]
+
+            per_domain_feats.append(feats_df.values[0])
+
+        if not per_domain_feats:
+            raise RuntimeError(
+                f"TSFEL feature extraction failed for all domains for series {i}."
+            )
+
+        feature_rows.append(np.concatenate(per_domain_feats, axis=-1))
 
     features = np.array(feature_rows, dtype=np.float64)
 
