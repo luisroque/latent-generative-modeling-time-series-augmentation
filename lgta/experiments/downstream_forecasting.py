@@ -46,6 +46,7 @@ class EvalMode(Enum):
     TSTR = "TSTR"
     DOWNSTREAM = "downstream_task"
 
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -127,7 +128,11 @@ class ExperimentConfig:
 
     @property
     def effective_transformations(self) -> list[str]:
-        return self.variant_transformations if self.variant_transformations else [self.lgta_transformation]
+        return (
+            self.variant_transformations
+            if self.variant_transformations
+            else [self.lgta_transformation]
+        )
 
     @property
     def n_variants(self) -> int:
@@ -479,9 +484,7 @@ def _lgta_method_dir(cache_dir: Path, cfg: ExperimentConfig) -> Path:
     return cache_dir / ("LGTA_" + _lgta_config_slug(cfg))
 
 
-def _method_dir_for(
-    cache_dir: Path, method_name: str, cfg: ExperimentConfig
-) -> Path:
+def _method_dir_for(cache_dir: Path, method_name: str, cfg: ExperimentConfig) -> Path:
     """Resolve method name to cache dir; LGTA uses config-keyed subdir."""
     if method_name == "LGTA":
         return _lgta_method_dir(cache_dir, cfg)
@@ -546,30 +549,53 @@ def _save_shared_test_data(
 def _load_shared_test_data(
     cache_dir: Path,
     window_size: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, float, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    float,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+]:
     X_orig = np.load(cache_dir / "X_orig.npy")
     y_test = np.load(cache_dir / "y_test.npy")
     X_test_windows = np.load(cache_dir / "X_test_windows.npy")
     n_orig_features = int((cache_dir / "n_orig_features.txt").read_text())
     valid_mask_path = cache_dir / "valid_mask.npy"
-    valid_mask = np.load(valid_mask_path).astype(bool) if valid_mask_path.exists() else None
+    valid_mask = (
+        np.load(valid_mask_path).astype(bool) if valid_mask_path.exists() else None
+    )
     scale_path = cache_dir / "scale.npy"
     if scale_path.exists():
         scale = float(np.load(scale_path))
     else:
-        w = int((cache_dir / "window_size.txt").read_text()) if (cache_dir / "window_size.txt").exists() else (window_size or 10)
+        w = (
+            int((cache_dir / "window_size.txt").read_text())
+            if (cache_dir / "window_size.txt").exists()
+            else (window_size or 10)
+        )
         X_win, y_win = _prepare_windows(X_orig, w)
         n_test = X_test_windows.shape[0]
         n_train = X_win.shape[0] - n_test
-        y_train_mask = _y_train_mask_from_valid_mask(valid_mask, w, n_train, n_orig_features)
-        scale = _mase_scale(X_win[:n_train], y_win[:n_train, :n_orig_features], y_train_mask)
+        y_train_mask = _y_train_mask_from_valid_mask(
+            valid_mask, w, n_train, n_orig_features
+        )
+        scale = _mase_scale(
+            X_win[:n_train], y_win[:n_train, :n_orig_features], y_train_mask
+        )
     mean_path = cache_dir / "y_train_mean.npy"
     std_path = cache_dir / "y_train_std.npy"
     if mean_path.exists() and std_path.exists():
         y_train_mean = np.load(mean_path)
         y_train_std = np.load(std_path)
     else:
-        w = int((cache_dir / "window_size.txt").read_text()) if (cache_dir / "window_size.txt").exists() else (window_size or 10)
+        w = (
+            int((cache_dir / "window_size.txt").read_text())
+            if (cache_dir / "window_size.txt").exists()
+            else (window_size or 10)
+        )
         _, y_win = _prepare_windows(X_orig, w)
         n_test = X_test_windows.shape[0]
         y_train = y_win[: y_win.shape[0] - n_test, :n_orig_features]
@@ -578,7 +604,16 @@ def _load_shared_test_data(
         y_train_std = np.maximum(y_train_std, 1e-8)
         np.save(mean_path, y_train_mean)
         np.save(std_path, y_train_std)
-    return X_orig, y_test, X_test_windows, n_orig_features, scale, y_train_mean, y_train_std, valid_mask
+    return (
+        X_orig,
+        y_test,
+        X_test_windows,
+        n_orig_features,
+        scale,
+        y_train_mean,
+        y_train_std,
+        valid_mask,
+    )
 
 
 def _has_shared_test_data(cache_dir: Path) -> bool:
@@ -668,9 +703,7 @@ def _save_synthetic_variants(method_dir: Path, variants: list[np.ndarray]) -> No
 def _has_synthetic_variants(method_dir: Path, n_variants: int) -> bool:
     if n_variants == 1:
         return _has_synthetic(method_dir)
-    return all(
-        (method_dir / f"synthetic_v{i}.npy").exists() for i in range(n_variants)
-    )
+    return all((method_dir / f"synthetic_v{i}.npy").exists() for i in range(n_variants))
 
 
 def _load_synthetic_variants(method_dir: Path, n_variants: int) -> list[np.ndarray]:
@@ -679,9 +712,7 @@ def _load_synthetic_variants(method_dir: Path, n_variants: int) -> list[np.ndarr
     return [np.load(method_dir / f"synthetic_v{i}.npy") for i in range(n_variants)]
 
 
-def _methods_with_synthetic(
-    cache_dir: Path, cfg: ExperimentConfig
-) -> list[str]:
+def _methods_with_synthetic(cache_dir: Path, cfg: ExperimentConfig) -> list[str]:
     """Return list of known method names that have cached synthetic data."""
     return [
         name
@@ -771,7 +802,9 @@ def _plot_predictions_by_method_forecaster(
     method_names = [
         name
         for name in _known_cache_method_names(cfg.n_variants)
-        if _has_predictions(_pred_dir(_method_dir_for(cache_dir, name, cfg), cfg.eval_mode))
+        if _has_predictions(
+            _pred_dir(_method_dir_for(cache_dir, name, cfg), cfg.eval_mode)
+        )
     ]
     if not method_names:
         return
@@ -836,9 +869,7 @@ def _plot_predictions_by_method_forecaster(
             if y_test_vmask is not None:
                 lstm_pred_mean[~y_test_vmask[:, series_idx]] = np.nan
             ax = axes[row]
-            ax.plot(
-                t_full, actual_full_s, label="Actual", color="C0", alpha=0.9
-            )
+            ax.plot(t_full, actual_full_s, label="Actual", color="C0", alpha=0.9)
             if f_lstm is not None:
                 lstm_fit_mean = f_lstm.mean(axis=0)[:n_train, series_idx].copy()
                 if y_train_vmask is not None:
@@ -887,7 +918,10 @@ def _load_original_data(
     ppc = PreprocessDatasets(dataset=cfg.dataset_name, freq=cfg.freq)
     data = ppc.apply_preprocess()
     X = np.nan_to_num(
-        data["predict"]["data_matrix"].astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0
+        data["predict"]["data_matrix"].astype(np.float32),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
     )
     mask = data["predict"].get("valid_mask")
     valid_mask = mask.astype(bool) if mask is not None else None
@@ -1030,6 +1064,7 @@ _BENCHMARK_NAME_ALIASES: dict[str, str] = {
     "timegan": "TimeGANGenerator",
     "timevae": "TimeVAEGenerator",
     "diffusion_ts": "DiffusionTSGenerator",
+    "diffusion-ts": "DiffusionTSGenerator",
     "diffusiontsgenerator": "DiffusionTSGenerator",
     "direct": "DirectTransformGenerator",
 }
@@ -1054,6 +1089,7 @@ def run_downstream_forecasting(
     cfg: ExperimentConfig | None = None,
     method: str | None = None,
     results_only: bool = False,
+    force_regenerate_generators: bool = False,
 ) -> list[ForecastResult]:
     """Run downstream forecasting comparison in the configured evaluation mode.
 
@@ -1089,7 +1125,9 @@ def run_downstream_forecasting(
 
     dyn_label = "WITH" if cfg.use_dynamic_features else "WITHOUT"
     print("=" * 70)
-    print(f"DOWNSTREAM FORECASTING EXPERIMENT  [{cfg.eval_mode.value}]  [{dyn_label} dynamic features]")
+    print(
+        f"DOWNSTREAM FORECASTING EXPERIMENT  [{cfg.eval_mode.value}]  [{dyn_label} dynamic features]"
+    )
     if single:
         print(f"  (single method: {method_canonical})")
     print("=" * 70)
@@ -1146,12 +1184,16 @@ def run_downstream_forecasting(
         orig_pred = _pred_dir(orig_method_dir, cfg.eval_mode)
         if _has_predictions(orig_pred):
             print("\n[2/4] Original: loading from cache ...")
-            X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = _load_shared_test_data(
-                cache, cfg.window_size
+            X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = (
+                _load_shared_test_data(cache, cfg.window_size)
             )
             n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
             y_test_mask = _y_test_mask_from_valid_mask(
-                valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
+                valid_mask,
+                cfg.window_size,
+                n_train_win,
+                y_test.shape[0],
+                n_orig_features,
             )
             p_lstm = _load_predictions(orig_pred)
             all_results.extend(
@@ -1197,18 +1239,20 @@ def run_downstream_forecasting(
         lgta_pred = _pred_dir(lgta_method_d, cfg.eval_mode)
         if _has_predictions(lgta_pred):
             print("\n[3/4] LGTA: loading from cache ...")
-            X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = _load_shared_test_data(
-                cache, cfg.window_size
+            X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = (
+                _load_shared_test_data(cache, cfg.window_size)
             )
             n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
             y_test_mask = _y_test_mask_from_valid_mask(
-                valid_mask, cfg.window_size, n_train_win, y_test.shape[0], n_orig_features
+                valid_mask,
+                cfg.window_size,
+                n_train_win,
+                y_test.shape[0],
+                n_orig_features,
             )
             p_lstm = _load_predictions(lgta_pred)
             all_results.extend(
-                _results_from_predictions(
-                    "LGTA", y_test, p_lstm, scale, y_test_mask
-                )
+                _results_from_predictions("LGTA", y_test, p_lstm, scale, y_test_mask)
             )
         else:
             print("\n[3/4] Evaluating LGTA ...")
@@ -1249,14 +1293,14 @@ def run_downstream_forecasting(
         if not benchmarks_to_run:
             raise ValueError(
                 f"Unknown or unavailable method: {method}. "
-                f"Choose from: original, lgta, timegan, timevae, direct."
+                f"Choose from: original, lgta, timegan, timevae, diffusion-ts, direct."
             )
 
     if benchmarks_to_run:
         print(f"\n[4/4] Evaluating {len(benchmarks_to_run)} benchmark method(s) ...")
         _release_memory()
-        X_orig, y_test, _, n_orig_features, scale, y_mean, y_std, valid_mask = _load_shared_test_data(
-            cache, cfg.window_size
+        X_orig, y_test, _, n_orig_features, scale, y_mean, y_std, valid_mask = (
+            _load_shared_test_data(cache, cfg.window_size)
         )
         n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
         y_test_mask = _y_test_mask_from_valid_mask(
@@ -1270,16 +1314,15 @@ def run_downstream_forecasting(
             name = _benchmark_display_name(gen, n_v)
             method_d = _method_dir(cache, name, n_v)
             bench_pred = _pred_dir(method_d, cfg.eval_mode)
-            if _has_predictions(bench_pred):
+            use_cache = not force_regenerate_generators
+            if use_cache and _has_predictions(bench_pred):
                 print(f"  {name}: loading from cache ...")
                 p_lstm = _load_predictions(bench_pred)
                 all_results.extend(
-                    _results_from_predictions(
-                        name, y_test, p_lstm, scale, y_test_mask
-                    )
+                    _results_from_predictions(name, y_test, p_lstm, scale, y_test_mask)
                 )
                 continue
-            if _has_synthetic_variants(method_d, n_v):
+            if use_cache and _has_synthetic_variants(method_d, n_v):
                 print(
                     f"  {name}: loading synthetic from cache, training forecasters ..."
                 )
@@ -1289,8 +1332,11 @@ def run_downstream_forecasting(
                 t0 = time.perf_counter()
                 rss_before = _current_rss_mb()
                 variants = _generate_benchmark_variants(
-                    gen, X_orig, cfg.effective_transformations, valid_mask,
-                    weights_dir=cache,
+                    gen,
+                    X_orig,
+                    cfg.effective_transformations,
+                    valid_mask,
+                    weights_dir=None if force_regenerate_generators else cache,
                 )
                 rss_after = _current_rss_mb()
                 resource_usages.append(
@@ -1302,9 +1348,7 @@ def run_downstream_forecasting(
                 )
                 _save_synthetic_variants(method_d, variants)
             if valid_mask is not None:
-                variants = [
-                    v * valid_mask.astype(np.float32) for v in variants
-                ]
+                variants = [v * valid_mask.astype(np.float32) for v in variants]
             train_variants = variants if is_tstr else [X_orig] + variants
             results, p_lstm, f_lstm = _evaluate_method(
                 name,
@@ -1326,7 +1370,12 @@ def run_downstream_forecasting(
             _release_memory()
 
     _print_results(all_results)
-    effective_out = cfg.output_dir / cfg.eval_mode.value / cfg.dynamic_subdir / _lgta_config_slug(cfg)
+    effective_out = (
+        cfg.output_dir
+        / cfg.eval_mode.value
+        / cfg.dynamic_subdir
+        / _lgta_config_slug(cfg)
+    )
     print(f"\nResults written to: {effective_out}")
     _save_results(all_results, effective_out)
     if resource_usages:
@@ -1348,8 +1397,8 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
         raise FileNotFoundError(
             f"Shared test data missing in {cache}. Run at least one method first."
         )
-    X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = _load_shared_test_data(
-        cache, cfg.window_size
+    X_orig, y_test, _, n_orig_features, scale, _, _, valid_mask = (
+        _load_shared_test_data(cache, cfg.window_size)
     )
     n_train_win = X_orig.shape[0] - cfg.window_size - y_test.shape[0]
     y_test_mask = _y_test_mask_from_valid_mask(
@@ -1372,7 +1421,12 @@ def _run_results_only(cfg: ExperimentConfig, cache: Path) -> list[ForecastResult
             "Run at least one method first."
         )
     _print_results(all_results)
-    effective_out = cfg.output_dir / cfg.eval_mode.value / cfg.dynamic_subdir / _lgta_config_slug(cfg)
+    effective_out = (
+        cfg.output_dir
+        / cfg.eval_mode.value
+        / cfg.dynamic_subdir
+        / _lgta_config_slug(cfg)
+    )
     print(f"\nResults written to: {effective_out}")
     _save_results(all_results, effective_out)
     _plot_original_vs_generated(cache, effective_out, cfg, n_series=6, seed=SEED)
@@ -1431,22 +1485,27 @@ def _save_results(results: list[ForecastResult], output_dir: Path) -> None:
 def _save_resource_usage(
     resource_usages: list[ResourceUsage], output_dir: Path
 ) -> None:
-    """Write resource_usage.json with time_seconds and memory_mb per method."""
+    """Write resource_usage.json with time_seconds and memory_mb per method.
+    Merges with any existing resource_usage.json in output_dir so entries from
+    previous runs (other methods) are kept; same method is updated with new values.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "resource_usage.json"
+    existing = _load_resource_usage_json(path)
+    merged: dict[str, ResourceUsage] = {u.method: u for u in (existing or [])}
+    for u in resource_usages:
+        merged[u.method] = u
+    to_write = sorted(merged.values(), key=lambda x: x.method)
     path.write_text(
         json.dumps(
             [
-                {
-                    "method": u.method,
-                    "time_seconds": u.time_seconds,
-                    "memory_mb": u.memory_mb,
-                }
-                for u in resource_usages
+                {"method": u.method, "time_seconds": u.time_seconds, "memory_mb": u.memory_mb}
+                for u in to_write
             ],
             indent=2,
         )
     )
+    print(f"Resource usage saved to {path} ({len(to_write)} method(s))")
 
 
 def _save_results_by_forecaster(
@@ -1461,8 +1520,7 @@ def _save_results_by_forecaster(
     if original is not None:
         original_mase = original.mase_mean
         with_pct = [
-            (r, (r.mase_mean - original_mase) / original_mase * 100.0)
-            for r in subset
+            (r, (r.mase_mean - original_mase) / original_mase * 100.0) for r in subset
         ]
         ordered = sorted(with_pct, key=lambda x: x[1])
         lines.append("| Method | MASE (mean) | ± std | % change vs Original |")
@@ -1647,7 +1705,9 @@ def _write_combined_summary(output_dir: Path) -> None:
             r.method for r in results
         )
     all_methods = sorted(
-        set().union(*(s for s in methods_per_pair.values())) if methods_per_pair else set()
+        set().union(*(s for s in methods_per_pair.values()))
+        if methods_per_pair
+        else set()
     )
     eval_modes = ["TSTR", "downstream_task"]
     if any(m == "legacy" for m, _, _, _ in discovered):
@@ -1655,9 +1715,7 @@ def _write_combined_summary(output_dir: Path) -> None:
 
     _DYN_DISPLAY = {"with_dynamic": "Yes", "without_dynamic": "No"}
 
-    def original_mase(
-        slug: str, dyn: str, mode: str, forecaster: str
-    ) -> float | None:
+    def original_mase(slug: str, dyn: str, mode: str, forecaster: str) -> float | None:
         key = (slug, dyn, mode)
         if key not in by_key:
             return None
@@ -1709,7 +1767,13 @@ def _write_combined_summary(output_dir: Path) -> None:
         freq_label = _slug_to_freq(slug)
         dyn_label = _DYN_DISPLAY.get(dyn, dyn)
         for method in all_methods:
-            row_cells: list[str] = [dataset_short, freq_label, method, variants_label, dyn_label]
+            row_cells: list[str] = [
+                dataset_short,
+                freq_label,
+                method,
+                variants_label,
+                dyn_label,
+            ]
             has_any = False
             for mode in eval_modes:
                 mase_str, pct_str = mase_and_pct(slug, dyn, mode, method, "LSTM")
@@ -1753,7 +1817,9 @@ def _write_rankings(output_dir: Path, combined_csv_path: Path) -> None:
         except ValueError:
             return None
 
-    key_to_entries: dict[tuple[str, str, str, str], list[tuple[str, float | None, float | None]]] = {}
+    key_to_entries: dict[
+        tuple[str, str, str, str], list[tuple[str, float | None, float | None]]
+    ] = {}
     for r in rows:
         dataset = r.get("Dataset", "")
         freq = r.get("Freq", "")
@@ -1765,10 +1831,15 @@ def _write_rankings(output_dir: Path, combined_csv_path: Path) -> None:
         key = (dataset, freq, variants, dynamic)
         key_to_entries.setdefault(key, []).append((method, tstr_mase, downstream_mase))
 
-    def rank_order(values: list[tuple[str, float | None]], lower_better: bool = True) -> list[str]:
+    def rank_order(
+        values: list[tuple[str, float | None]], lower_better: bool = True
+    ) -> list[str]:
         sorted_pairs = sorted(
             values,
-            key=lambda x: (x[1] is None, x[1] if x[1] is not None else (0.0 if lower_better else 1e9)),
+            key=lambda x: (
+                x[1] is None,
+                x[1] if x[1] is not None else (0.0 if lower_better else 1e9),
+            ),
             reverse=not lower_better,
         )
         return [m for m, _ in sorted_pairs]
@@ -1783,13 +1854,17 @@ def _write_rankings(output_dir: Path, combined_csv_path: Path) -> None:
         "|---------|------|----------|--------|-------------------|------------------------------|",
     ]
     groups = sorted(key_to_entries.keys())
-    for (dataset, freq, variants, dynamic) in groups:
+    for dataset, freq, variants, dynamic in groups:
         entries = key_to_entries[(dataset, freq, variants, dynamic)]
         tstr_order = rank_order([(m, t) for m, t, _ in entries])
         downstream_order = rank_order([(m, d) for m, _, d in entries])
         tstr_str = "<br>".join(f"{i+1}. {m}" for i, m in enumerate(tstr_order))
-        downstream_str = "<br>".join(f"{i+1}. {m}" for i, m in enumerate(downstream_order))
-        md_lines.append(f"| {dataset} | {freq} | {variants} | {dynamic} | {tstr_str} | {downstream_str} |")
+        downstream_str = "<br>".join(
+            f"{i+1}. {m}" for i, m in enumerate(downstream_order)
+        )
+        md_lines.append(
+            f"| {dataset} | {freq} | {variants} | {dynamic} | {tstr_str} | {downstream_str} |"
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     rank_path = output_dir / "RANKINGS.md"
@@ -1850,12 +1925,7 @@ def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None
         )
         return [m for m, _ in sorted_pairs]
 
-    cells = sorted(
-        k
-        for k in key_to_entries.keys()
-        if k[2] == "3var"
-        and k[3] == "No"
-    )
+    cells = sorted(k for k in key_to_entries.keys() if k[2] == "3var" and k[3] == "No")
     n_cells = len(cells)
 
     method_to_combined_mase: dict[str, list[float]] = {}
@@ -1863,7 +1933,7 @@ def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None
     method_to_wins_downstream: dict[str, int] = {}
     method_to_wins_either: dict[str, int] = {}
 
-    for (dataset, freq, variants, dynamic) in cells:
+    for dataset, freq, variants, dynamic in cells:
         entries = key_to_entries[(dataset, freq, variants, dynamic)]
         tstr_order = rank_order([(m, t) for m, t, _ in entries])
         downstream_order = rank_order([(m, d) for m, _, d in entries])
@@ -1892,7 +1962,13 @@ def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None
 
     all_methods = sorted(method_to_combined_mase.keys())
     method_rows = [
-        (m, mean_mase(m), method_to_wins_tstr.get(m, 0), method_to_wins_downstream.get(m, 0), method_to_wins_either.get(m, 0))
+        (
+            m,
+            mean_mase(m),
+            method_to_wins_tstr.get(m, 0),
+            method_to_wins_downstream.get(m, 0),
+            method_to_wins_either.get(m, 0),
+        )
         for m in all_methods
     ]
     method_rows.sort(key=lambda x: (x[1] is None, x[1] if x[1] is not None else 1e9))
@@ -1934,7 +2010,9 @@ def _write_aggregated_summary(output_dir: Path, combined_csv_path: Path) -> None
     ]
     for m, avg, w_t, w_d, w_e in method_rows:
         avg_str = f"{avg:.4f}" if avg is not None else "—"
-        md_lines.append(f"| {m} | {avg_str} | {w_t}/{n_cells} | {w_d}/{n_cells} | {w_e}/{n_cells} |")
+        md_lines.append(
+            f"| {m} | {avg_str} | {w_t}/{n_cells} | {w_d}/{n_cells} | {w_e}/{n_cells} |"
+        )
     md_lines.append("")
     md_lines.append("## LGTA: mean MASE by configuration")
     md_lines.append("")
@@ -1966,18 +2044,30 @@ def _write_resource_usage_summary(output_dir: Path) -> None:
     """Write RESOURCE_USAGE.md and RESOURCE_USAGE.csv from resource_usage.json in each result dir.
 
     One row per (dataset, method, variants, dynamic) with Time (s) and Memory (MB).
-    Uses one result dir per (config_slug, dynamic) to avoid duplicate rows across eval modes.
+    Merges resource_usage.json from all result dirs that share (config_slug, dynamic)
+    (e.g. TSTR and downstream_task) so we include every method that was measured in
+    any phase; for duplicate methods we keep the entry with the largest time (generation
+    rather than cache load).
     """
     discovered = _discover_result_dirs(output_dir)
     slug_dyn_pairs = sorted({(slug, dyn) for _mode, dyn, slug, _ in discovered})
-    dir_by_slug_dyn: dict[tuple[str, str], Path] = {}
+    dirs_by_slug_dyn: dict[tuple[str, str], list[Path]] = {}
     for _mode, dyn, slug, dir_path in discovered:
         key = (slug, dyn)
-        if key not in dir_by_slug_dyn:
-            dir_by_slug_dyn[key] = dir_path
+        if key not in dirs_by_slug_dyn:
+            dirs_by_slug_dyn[key] = []
+        dirs_by_slug_dyn[key].append(dir_path)
 
     _DYN_DISPLAY = {"with_dynamic": "Yes", "without_dynamic": "No"}
-    header = ["Dataset", "Freq", "Method", "Variants", "Dynamic", "Time (s)", "Memory (MB)"]
+    header = [
+        "Dataset",
+        "Freq",
+        "Method",
+        "Variants",
+        "Dynamic",
+        "Time (s)",
+        "Memory (MB)",
+    ]
     md_lines = [
         "# Resource Usage by Dataset and Augmentation Method",
         "",
@@ -1989,10 +2079,19 @@ def _write_resource_usage_summary(output_dir: Path) -> None:
     csv_rows: list[list[str]] = [header]
 
     for slug, dyn in slug_dyn_pairs:
-        dir_path = dir_by_slug_dyn.get((slug, dyn))
-        if dir_path is None:
-            continue
-        usages = _load_resource_usage_json(dir_path / "resource_usage.json")
+        dir_paths = dirs_by_slug_dyn.get((slug, dyn)) or []
+        method_to_usage: dict[str, ResourceUsage] = {}
+        for dir_path in dir_paths:
+            usages = _load_resource_usage_json(dir_path / "resource_usage.json")
+            if not usages:
+                continue
+            for u in usages:
+                if (
+                    u.method not in method_to_usage
+                    or u.time_seconds > method_to_usage[u.method].time_seconds
+                ):
+                    method_to_usage[u.method] = u
+        usages = sorted(method_to_usage.values(), key=lambda x: x.method)
         if not usages:
             continue
         dataset_short, variants_label = _slug_to_dataset_and_variants(slug)
@@ -2049,7 +2148,7 @@ if __name__ == "__main__":
         "--method",
         type=str,
         default=None,
-        help="Run only this method: original, lgta, timegan, timevae, direct (or class name e.g. TimeGANGenerator).",
+        help="Run only this method: original, lgta, timegan, timevae, diffusion-ts, direct (or class name e.g. TimeGANGenerator).",
     )
     parser.add_argument(
         "--output-dir",
@@ -2098,6 +2197,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Only write COMBINED_RESULTS.md/csv from existing downstream_results.json files (no training).",
     )
+    parser.add_argument(
+        "--force-regenerate-generators",
+        action="store_true",
+        help="Ignore cached synthetic data and predictions for benchmark generators; always train and generate (so resource usage is recorded).",
+    )
     args = parser.parse_args()
 
     if args.combine_only:
@@ -2108,8 +2212,9 @@ if __name__ == "__main__":
     variant_transformations = args.variant_transformations or []
     eval_mode = EvalMode(args.eval_mode)
     dynamic_settings: list[bool] = (
-        [True, False] if args.all_datasets and not args.no_dynamic_features else
-        [not args.no_dynamic_features]
+        [True, False]
+        if args.all_datasets and not args.no_dynamic_features
+        else [not args.no_dynamic_features]
     )
 
     if args.all_datasets:
@@ -2121,8 +2226,10 @@ if __name__ == "__main__":
             for i, (dataset_name, freq) in enumerate(DEFAULT_DATASET_CONFIGS):
                 _release_memory()
                 print(f"\n{'='*70}")
-                print(f"Dataset {i+1}/{len(DEFAULT_DATASET_CONFIGS)}: {dataset_name} (freq={freq})")
-                print("="*70)
+                print(
+                    f"Dataset {i+1}/{len(DEFAULT_DATASET_CONFIGS)}: {dataset_name} (freq={freq})"
+                )
+                print("=" * 70)
                 cfg = ExperimentConfig(
                     dataset_name=dataset_name,
                     freq=freq,
@@ -2136,6 +2243,7 @@ if __name__ == "__main__":
                     cfg,
                     method=args.method,
                     results_only=args.results_only,
+                    force_regenerate_generators=args.force_regenerate_generators,
                 )
         _write_combined_summary(args.output_dir)
         _write_resource_usage_summary(args.output_dir)
@@ -2160,4 +2268,6 @@ if __name__ == "__main__":
             cfg,
             method=args.method,
             results_only=args.results_only,
+            force_regenerate_generators=args.force_regenerate_generators,
         )
+        _write_resource_usage_summary(args.output_dir)
