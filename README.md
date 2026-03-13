@@ -12,7 +12,7 @@ export PYTHONPATH="${PWD}${PYTHONPATH:+:$PYTHONPATH}"
 ## Features
 
 - **L-GTA**: CVAE with Bi-LSTM encoder, temporal self-attention, optional dynamic time features; per-timestep latent code, equivariance objective, latent-space transformations.
-- **Experiments**: Downstream forecasting (vs TimeGAN, TimeVAE, Diffusion-TS, direct), component ablation (signatures, controllability), synthesis quality. See [docs/BENCHMARK_METHODS.md](docs/BENCHMARK_METHODS.md).
+- **Experiments**: Downstream forecasting (vs TimeGAN, TimeVAE, Diffusion-TS, direct), component ablation (signatures, controllability), synthesis quality.
 
 ## Run
 

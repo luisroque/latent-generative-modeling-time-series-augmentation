@@ -1,0 +1,106 @@
+
+\section{L-GTA}
+\label{chap:lt_gam}
+
+In this section, we introduce L-GTA, a method for generating semi-synthetic time series data. It integrates the capabilities of Transformers, Bidirectional Long Short-Term Memory Networks (Bi-LSTMs), Conditional Variational Autoencoders (CVAEs), an equivariance-regularized decoder, and traditional time series augmentation techniques. This architecture facilitates the efficient generation of diverse and controllable time series data that retain the statistical properties of the original dataset. Our approach combines random transformations and generative models~\cite{Iwana_2021} in a single method. Thus, we benefit from the simplicity and variety of transformation methods and the ability to generate realistic samples from generative models.
+
+
+\subsection{Generative Model}
+\label{chap:gen_model_architecture}
+
+L-GTA is a generative model that combines Bi-LSTMs and CVAEs with a temporal multi-head self-attention mechanism to generate semi-synthetic time series data. The self-attention layer augments the Bi-LSTM encoder to capture long-range temporal dependencies while preserving a latent representation at each timestep, enabling transformations to be applied directly in latent space.
+
+The L-GTA model processes an input time series $z$ alongside a contextual condition $c$ by concatenating $z$ with dynamic context features and feeding them into a Bi-LSTM encoder. A temporal multi-head self-attention block is then applied to the sequence of Bi-LSTM hidden states, enabling the model to attend to different parts of the sequence and capture long-term dynamics. This process can be formalized as follows:
+%
+\begin{equation}
+\left(\mu_t, \Sigma_t\right) = \phi(\mathrm{SA}(h_t)),
+\end{equation}
+%
+where $h_t$ represents the Bi-LSTM hidden state at time $t$, and $\mathrm{SA}(h_t)$ denotes the application of a temporal multi-head self-attention mechanism over the sequence of hidden states, enriching their representation. The contextual condition $c$ is incorporated into $h_t$ through concatenation with the input before the Bi-LSTM. The function $\phi$ then maps this enriched representation to the parameters $\mu_t$ and $\Sigma_t$ of a Gaussian distribution, from which the latent space representation $v_t$ is sampled:
+%
+\begin{equation}
+v_t \sim \mathcal{N}(\mu_t, \Sigma_t).
+\end{equation}
+
+This enables the production of various plausible time series variations. The bidirectional structure of the Bi-LSTM, augmented with self-attention, is particularly adept at learning complex temporal structures in the data. These are critical to learn in order to generate high-quality semi-synthetic instances of time series data.
+
+This encoder produces a per-timestep latent space $v = (v_1, \dots, v_T)$ so that temporal transformations applied in latent space preserve their character through decoding.
+
+The decoding process reconstructs the time series $\tilde{z}$ from the latent trajectory $v$ and contextual condition $c$. We denote this operation by the decoder
+\begin{equation}
+\tilde{z} = \mathcal{D}(v; c),
+\end{equation}
+which maps a latent sequence $v$ and context $c$ to a reconstructed series.
+
+In practice, $\mathcal{D}$ is implemented using a Bi-LSTM decoder:
+\begin{equation}
+\tilde{y}_t = \mathrm{Bi\text{-}LSTM}(v_t, \tilde{h}_{t-1}, c), \quad
+\tilde{z}_t = \psi(\tilde{y}_t),
+\end{equation}
+where $\tilde{y}_t$ denotes the decoder output at time $t$, and $\psi$ maps it to the reconstructed observation $\tilde{z}_t$.
+
+
+A distinctive feature of L-GTA is its ability to generate datasets with controlled variability, enabling the systematic variation of the similarity between the original and generated data. The process involves applying parametric transformations to the latent space of the model, which can be defined as $v^{\prime i} = \mathcal{T}_{\eta}(v^{i}, \eta)$. Here, $\mathcal{T}$ represents the transformation function, and $\eta$ its parameters. The transformed latent representation $v^{\prime i}$ is then decoded to yield the transformed time series $\tilde{z}^{\prime i} = \mathcal{D}(v^{\prime i})$, maintaining consistency with the statistical properties of the original series.
+
+Furthermore, L-GTA supports the sequential chaining of multiple transformations in the latent space, thus enabling the generation of an extensive and diverse set of semi-synthetic time series. This is formulated as:
+%
+\begin{equation}
+v^{\prime i} = \mathcal{T}_n\bigl( \dots \mathcal{T}_2(\mathcal{T}_1(v^{i}, \eta_1), \eta_2) \dots, \eta_n \bigr),
+\end{equation}
+%
+where $\{\mathcal{T}_1, \mathcal{T}_2, ..., \mathcal{T}_n\}$ are the transformation functions, applied in sequence with their respective parameters $\{\eta_1, \eta_2, ..., \eta_n\}$. In the implementation, each transformation in the chain is applied to a normalized version of the latent trajectory, and the result is re-normalized before applying the next transformation. This ensures that non-additive transformations (such as multiplicative or spline-based warps) remain well-behaved across different magnitudes.
+
+\subsection{Equivariance Regularization}
+\label{chap:equivariance}
+
+L-GTA incorporates an equivariance regularization term to encourage consistency between transformations applied in latent and observation spaces. Specifically, applying a transformation in latent space followed by decoding should produce a result similar to decoding first and then applying the corresponding transformation in data space. Let $\mathcal{T}$ denote a perturbation drawn from the same family as the time series transformations (e.g., jitter, scaling), applied either in latent or observation space. We therefore enforce the approximate equivariance condition
+\begin{equation}
+\mathcal{D}(\mathcal{T}(v); c) \approx \mathcal{T}(\mathcal{D}(v; c)),
+\end{equation}
+i.e., the decoder should be equivariant to these perturbations. During training, for each batch we sample a transformation $\mathcal{T}_{\eta}$ by drawing parameters $\eta$ from the predefined parameter space of the transformation family. We then compute the decoded observation $\hat{x} = \mathcal{D}(v; c)$ from the current latent mean $v$ and define the \emph{equivariance loss} as the mean squared error between decoding the perturbed latent and the perturbed decoding:
+\begin{equation}
+\mathcal{L}_{\mathrm{equiv}} = \mathbb{E}_{v,c,\mathcal{T}}\Bigl[ \bigl\| \mathcal{D}(\mathcal{T}(v); c) - \mathcal{T}(\mathcal{D}(v; c)) \bigr\|^2 \Bigr].
+\end{equation}
+In practice we use a single sampled $\mathcal{T}$ per batch and approximate the expectation by the average over the batch. The total training loss is
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{\mathrm{recon}} + \beta \, \mathcal{L}_{\mathrm{KL}} + \lambda_{\mathrm{equiv}} \, \mathcal{L}_{\mathrm{equiv}},
+\end{equation}
+where $\mathcal{L}_{\mathrm{recon}}$ is the reconstruction loss, $\mathcal{L}_{\mathrm{KL}}$ is the KL divergence to the prior, and $\lambda_{\mathrm{equiv}} \geq 0$ is the equivariance weight. This term encourages the decoder to map latent perturbations to consistent changes in the reconstructed series, improving controllability when we apply the transformation functions.
+
+
+
+\subsection{Time Series Transformations}
+\label{chap:tranfs}
+
+
+
+The transformations applied to the latent representation are meant to affect both individual time series components and relationships between series in a dataset. However, to be realistic, they should preserve a meaningful relationship between the original and the transformed series. For that to happen, the transformation functions need to be smooth and continuous. This ensures that similar parameters produce closely related transformed series.
+
+
+We employ five magnitude domain transformations — jittering, scaling, magnitude warping, drift, and trend~\cite{Iwana_2021} — to demonstrate the applicability of L-GTA. These magnitude transformations affect the values of elements while preserving the integrity of the time steps. L-GTA can be easily extended to incorporate other transformations.
+
+Jittering is defined as the addition of a random noise component to the values of a time series. It can be defined as $v_{r,t}^{'i} = v_{t}^i + \epsilon^i_{r,t}$ where $\epsilon^i_{r,t} \sim \mathcal{N}(0, \sigma_v^2)$.
+%
+and the standard deviation $\sigma_{r, i}$ of the added noise is a parameter of the transformation. Applying jittering to the time series via the addition of i.i.d. Gaussian noise is widely used in the literature to simulate realistic sources of measurement error or irregularity in time series data~\cite{Iwana_2021}. For example, consider a retail store where sales data suddenly becomes more erratic due to unexpected external factors such as local construction affecting customer traffic.
+
+
+Another transformation we used was scaling, which involves modifying the amplitude of the series by a random scalar value. It is defined as ${v}_{r,t}^{'i} = \alpha^i_{r} {v}_{t}^i$ where $\alpha^i_{r} \sim \mathcal{N}(0, \sigma_{r,i}^2)$. Once again, $\sigma_{r, i}$ is a parameter defining the standard deviation of the multiplicative effect for each version of the dataset and series. Scaling the time series data via a multiplicative factor simulates realistic changes in the magnitude of the time series. For example, consider a retail store experiencing increased variability in sales due to various promotional campaigns executed by the store itself and its competitors.
+
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{Figures/generated_ts.png}
+\caption{
+This figure compares the original and transformed time series of the tourism dataset over four examples (rows) for two transformation (columns) types. The first two columns display the original data alongside the data transformed using the L-GTA and direct methods using jittering. We are essentially adding random noise to the series. The last two columns show the original data compared with transformations by L-GTA and direct methods through magnitude warping. The transformation produces non-linear amplitude adjustments in the original series.
+}
+\label{fig:time_series_visualization}
+\end{figure*}
+
+
+
+
+We also applied magnitude warping~\cite{Iwana_2021}. This method causes a smooth, continuous, nonlinear transformation of time series data. It is written as ${v}^{'i}_{r, t} = S^i_{{u}^i_k}({v}^{i}_{r, t})$ where ${u}^i_k \sim \mathcal{N}(1, \sigma_{r,i}^2)$. Note that $S^i_{{u}^i_k}$ interpolates a cubic spline with knots $\textbf{u}=u_{1}, ..., u_{k}$. Each knot $u_k$ comes from a distribution $\mathcal{N}(1, \sigma_{r, i}^2)$, with the number of knots $k$ and the standard deviation $\sigma_{v, i}$ as pararameters. The cubic spline is fitted to the original data points, and the transformed data is obtained by scaling the original magnitude using the evaluated cubic spline function values. The proposed transformation method modulates the magnitude of the time series, maintaining its overall structure and smoothness. In retail, for example, magnitude warping could accentuate summer season sales for a store close to a beach area during unusually high temperatures.
+
+Drift adds a cumulative random walk to the series: at each time step, a Gaussian step is drawn and added to the running sum, so perturbations are autocorrelated rather than i.i.d. Formally, let $\varepsilon^i_{r,t} \sim \mathcal{N}(0, \sigma_{r,i}^2/T)$; then $v^{\prime i}_{r,t} = v^i_t + \sum_{s=1}^{t} \varepsilon^i_{r,s}$. The scale $\sigma_{r,i}$ controls the magnitude of the induced drift. Unlike jittering, drift produces smooth, trending deviations that can reflect gradual shifts in level (e.g., slowly changing demand).
+
+Trend injects a random linear ramp per series. With $T$ time steps, let $\tau_t = (t-1)/(T-1) - 0.5$ so $\tau$ runs from $-0.5$ to $0.5$, and let $\beta^i_r \sim \mathcal{N}(0, 1)$ be a per-series slope. Then $v^{\prime i}_{r,t} = v^i_t + \sigma_{r,i} \, \beta^i_r \, \tau_t$. The parameter $\sigma_{r,i}$ controls the amplitude of the linear trend. This can model systematic linear growth or decline (e.g., a sustained change in sales level over the horizon). 
