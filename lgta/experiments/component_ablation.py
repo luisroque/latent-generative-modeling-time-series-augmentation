@@ -695,6 +695,66 @@ def write_ablation_table_md(
     print(f"Saved: {md_path}")
 
 
+FINGERPRINT_CSV_COLUMNS: tuple[str, ...] = (
+    "variant",
+    "transformation",
+    "autocorrelation",
+    "linearity",
+    "amplitude_dependence",
+    "spearman_rho",
+    "monotonic",
+)
+
+FINGERPRINT_CSV_COLUMNS_LEGACY: tuple[str, ...] = (
+    "variant",
+    "transformation",
+    "autocorrelation",
+    "linearity",
+    "amplitude_dependence",
+)
+
+
+def _save_fingerprint_csv(
+    results: list[ComponentAblationResult],
+    output_dir: Path,
+) -> None:
+    """Persist per-transformation fingerprint values for every ablation variant
+    plus the Direct baseline so that cross-dataset summary plots can be
+    reconstructed without re-running experiments."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / "fingerprint_data.csv"
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(FINGERPRINT_CSV_COLUMNS))
+        writer.writeheader()
+        for r in results:
+            for t in ALL_TRANSFORMATIONS:
+                tr = r.transformation_results[t]
+                fp = tr.fingerprint
+                writer.writerow({
+                    "variant": r.name,
+                    "transformation": t,
+                    "autocorrelation": f"{fp.autocorrelation:.6f}",
+                    "linearity": f"{fp.linearity:.6f}",
+                    "amplitude_dependence": f"{fp.amplitude_dependence:.6f}",
+                    "spearman_rho": f"{tr.spearman_rho:.6f}",
+                    "monotonic": "1" if tr.is_monotonic else "0",
+                })
+        first_result = results[0]
+        for t in ALL_TRANSFORMATIONS:
+            tr0 = first_result.transformation_results[t]
+            dfp = tr0.direct_fingerprint
+            writer.writerow({
+                "variant": "Direct",
+                "transformation": t,
+                "autocorrelation": f"{dfp.autocorrelation:.6f}",
+                "linearity": f"{dfp.linearity:.6f}",
+                "amplitude_dependence": f"{dfp.amplitude_dependence:.6f}",
+                "spearman_rho": f"{tr0.direct_spearman_rho:.6f}",
+                "monotonic": "1" if tr0.direct_is_monotonic else "0",
+            })
+    print(f"Saved: {csv_path}")
+
+
 def _load_csv_rows(path: Path) -> list[dict[str, str]]:
     """Load rows from a CSV file; returns empty list if file is missing or empty."""
     if not path.exists():
@@ -792,6 +852,341 @@ def write_cross_dataset_ablation_summary(
     md_out = base_output_dir / "CROSS_DATASET_ABLATION.md"
     md_out.write_text("\n".join(lines) + "\n")
     print(f"Saved: {md_out}")
+
+
+@dataclass
+class _FingerprintRow:
+    variant: str
+    transformation: str
+    autocorrelation: float
+    linearity: float
+    amplitude_dependence: float
+    spearman_rho: float | None = None
+    monotonic: float | None = None
+
+
+def _load_fingerprint_rows(csv_path: Path) -> list[_FingerprintRow]:
+    """Load fingerprint CSV into typed rows; returns empty list if missing.
+    Supports legacy CSVs without spearman_rho/monotonic columns."""
+    if not csv_path.exists():
+        return []
+    rows: list[_FingerprintRow] = []
+    with csv_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        has_rho = "spearman_rho" in fieldnames
+        has_mono = "monotonic" in fieldnames
+        for raw in reader:
+            rho = float(raw["spearman_rho"]) if has_rho and raw.get("spearman_rho") else None
+            mono = float(raw["monotonic"]) if has_mono and raw.get("monotonic") else None
+            rows.append(_FingerprintRow(
+                variant=raw["variant"],
+                transformation=raw["transformation"],
+                autocorrelation=float(raw["autocorrelation"]),
+                linearity=float(raw["linearity"]),
+                amplitude_dependence=float(raw["amplitude_dependence"]),
+                spearman_rho=rho,
+                monotonic=mono,
+            ))
+    return rows
+
+
+_SIGNATURE_METRICS: list[tuple[str, str]] = [
+    ("autocorrelation", "Autocorrelation"),
+    ("linearity", r"Linearity ($R^2$)"),
+    ("amplitude_dependence", "Amplitude Dependence"),
+]
+
+_PRETTY_TRANSFORM: dict[str, str] = {
+    "jitter": "Jitter",
+    "scaling": "Scaling",
+    "magnitude_warp": "Mag. Warp",
+    "drift": "Drift",
+    "trend": "Trend",
+}
+
+
+def _compute_metric_mean_std(
+    dataset_fingerprints: list[tuple[str, str, list[_FingerprintRow]]],
+    lgta_variant: str,
+    metric_key: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Aggregate a fingerprint metric across datasets for L-GTA vs Direct.
+
+    Returns (mean_lgta, std_lgta, mean_direct, std_direct) as arrays ordered
+    according to ALL_TRANSFORMATIONS.
+    """
+    transformations = list(ALL_TRANSFORMATIONS)
+    lgta_means: list[float] = []
+    lgta_stds: list[float] = []
+    direct_means: list[float] = []
+    direct_stds: list[float] = []
+
+    for t in transformations:
+        lgta_vals: list[float] = []
+        direct_vals: list[float] = []
+        for _, _, rows in dataset_fingerprints:
+            by_key = {(r.variant, r.transformation): r for r in rows}
+            lgta_row = by_key.get((lgta_variant, t))
+            direct_row = by_key.get(("Direct", t))
+            if lgta_row is not None:
+                val = getattr(lgta_row, metric_key)
+                if val is not None:
+                    lgta_vals.append(float(val))
+            if direct_row is not None:
+                val = getattr(direct_row, metric_key)
+                if val is not None:
+                    direct_vals.append(float(val))
+        if lgta_vals:
+            lgta_arr = np.array(lgta_vals, dtype=float)
+            lgta_means.append(float(lgta_arr.mean()))
+            lgta_stds.append(float(lgta_arr.std(ddof=0)))
+        else:
+            lgta_means.append(0.0)
+            lgta_stds.append(0.0)
+        if direct_vals:
+            direct_arr = np.array(direct_vals, dtype=float)
+            direct_means.append(float(direct_arr.mean()))
+            direct_stds.append(float(direct_arr.std(ddof=0)))
+        else:
+            direct_means.append(0.0)
+            direct_stds.append(0.0)
+
+    return (
+        np.array(lgta_means, dtype=float),
+        np.array(lgta_stds, dtype=float),
+        np.array(direct_means, dtype=float),
+        np.array(direct_stds, dtype=float),
+    )
+
+
+def plot_cross_dataset_signature_summary(
+    base_output_dir: Path,
+    datasets: list[tuple[str, str]],
+    lgta_variant: str = "G: Full L-GTA, no dynamic",
+    output_filename: str = "CROSS_DATASET_SIGNATURE_SUMMARY.png",
+) -> None:
+    """Create a single figure comparing L-GTA vs Direct across all datasets.
+
+    Layout: 3 rows (metrics) x N columns (datasets).  Each cell shows paired
+    bars per transformation.
+    """
+    dataset_fingerprints: list[tuple[str, str, list[_FingerprintRow]]] = []
+    for dataset_name, freq in datasets:
+        csv_path = base_output_dir / dataset_name / freq / "fingerprint_data.csv"
+        rows = _load_fingerprint_rows(csv_path)
+        if rows:
+            dataset_fingerprints.append((dataset_name, freq, rows))
+
+    if not dataset_fingerprints:
+        print("No fingerprint CSVs found; skipping cross-dataset signature summary.")
+        return
+
+    n_datasets = len(dataset_fingerprints)
+    n_metrics = len(_SIGNATURE_METRICS)
+    fig, axes = plt.subplots(
+        n_metrics, n_datasets,
+        figsize=(4.0 * n_datasets, 3.0 * n_metrics),
+        sharey="row",
+        squeeze=False,
+    )
+
+    bar_width = 0.32
+    transformations = list(ALL_TRANSFORMATIONS)
+    x = np.arange(len(transformations))
+
+    for col_idx, (ds_name, freq, rows) in enumerate(dataset_fingerprints):
+        lgta_rows = [r for r in rows if r.variant == lgta_variant]
+        direct_rows = [r for r in rows if r.variant == "Direct"]
+
+        lgta_by_t = {r.transformation: r for r in lgta_rows}
+        direct_by_t = {r.transformation: r for r in direct_rows}
+
+        for row_idx, (metric_key, metric_label) in enumerate(_SIGNATURE_METRICS):
+            ax = axes[row_idx][col_idx]
+
+            lgta_vals = [
+                getattr(lgta_by_t[t], metric_key, 0.0)
+                if t in lgta_by_t else 0.0
+                for t in transformations
+            ]
+            direct_vals = [
+                getattr(direct_by_t[t], metric_key, 0.0)
+                if t in direct_by_t else 0.0
+                for t in transformations
+            ]
+
+            ax.bar(
+                x - bar_width / 2, lgta_vals, bar_width,
+                label="L-GTA", color="#2196F3", edgecolor="white", linewidth=0.5,
+            )
+            ax.bar(
+                x + bar_width / 2, direct_vals, bar_width,
+                label="Direct", color="#9E9E9E", alpha=0.75,
+                edgecolor="white", linewidth=0.5,
+            )
+
+            tick_labels = [_PRETTY_TRANSFORM.get(t, t) for t in transformations]
+            ax.set_xticks(x)
+            ax.set_xticklabels(
+                tick_labels, rotation=30, ha="right", fontsize=8,
+            )
+            ax.grid(True, alpha=0.15, axis="y")
+            ax.tick_params(axis="y", labelsize=8)
+
+            if row_idx == 0:
+                ax.set_title(
+                    f"{ds_name.upper()} ({freq})",
+                    fontsize=11, fontweight="bold", pad=6,
+                )
+            if col_idx == 0:
+                ax.set_ylabel(metric_label, fontsize=10)
+            if row_idx == 0 and col_idx == n_datasets - 1:
+                ax.legend(fontsize=8, loc="upper right")
+
+    fig.suptitle(
+        "Transformation Signature: L-GTA vs Direct",
+        fontsize=14, fontweight="bold", y=1.01,
+    )
+    plt.tight_layout()
+    out = base_output_dir / output_filename
+    plt.savefig(out, dpi=300, bbox_inches="tight")
+    print(f"Saved: {out}")
+    plt.close()
+
+
+def _draw_paired_bars(
+    ax: plt.Axes,
+    x: np.ndarray,
+    lgta_mean: np.ndarray,
+    lgta_std: np.ndarray,
+    direct_mean: np.ndarray,
+    direct_std: np.ndarray,
+    tick_labels: list[str],
+    ylabel: str,
+    bar_width: float = 0.35,
+    show_legend: bool = False,
+) -> None:
+    """Draw paired L-GTA vs Direct bars with error bars on a given axes."""
+    ax.bar(
+        x - bar_width / 2, lgta_mean, bar_width,
+        yerr=lgta_std, label="L-GTA", color="#2196F3",
+        edgecolor="white", linewidth=0.5, alpha=0.9, capsize=3,
+    )
+    ax.bar(
+        x + bar_width / 2, direct_mean, bar_width,
+        yerr=direct_std, label="Direct", color="#9E9E9E",
+        edgecolor="white", linewidth=0.5, alpha=0.8, capsize=3,
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=10)
+    ax.grid(True, alpha=0.2, axis="y")
+    if show_legend:
+        ax.legend(fontsize=8)
+
+
+def plot_cross_dataset_signature_summary_averaged(
+    base_output_dir: Path,
+    datasets: list[tuple[str, str]],
+    lgta_variant: str = "G: Full L-GTA, no dynamic",
+    output_filename: str = "CROSS_DATASET_SIGNATURE_MONO_SUMMARY.png",
+) -> None:
+    """Create a 5-panel figure (3 top + 2 bottom) with dataset-averaged
+    signatures and controllability.
+
+    Top row: autocorrelation, linearity, amplitude dependence.
+    Bottom row: Spearman rho, Monotonic %.
+    All averaged over datasets with standard deviation error bars.
+    """
+    from matplotlib.gridspec import GridSpec
+
+    dataset_fingerprints: list[tuple[str, str, list[_FingerprintRow]]] = []
+    for dataset_name, freq in datasets:
+        csv_path = base_output_dir / dataset_name / freq / "fingerprint_data.csv"
+        rows = _load_fingerprint_rows(csv_path)
+        if rows:
+            dataset_fingerprints.append((dataset_name, freq, rows))
+
+    if not dataset_fingerprints:
+        print("No fingerprint CSVs found; skipping averaged cross-dataset signature summary.")
+        return
+
+    transformations = list(ALL_TRANSFORMATIONS)
+    x = np.arange(len(transformations), dtype=float)
+    tick_labels = [_PRETTY_TRANSFORM.get(t, t) for t in transformations]
+
+    fig = plt.figure(figsize=(14, 8))
+    gs = GridSpec(2, 6, figure=fig, hspace=0.45, wspace=0.55)
+    ax_auto = fig.add_subplot(gs[0, 0:2])
+    ax_lin = fig.add_subplot(gs[0, 2:4])
+    ax_amp = fig.add_subplot(gs[0, 4:6])
+    ax_rho = fig.add_subplot(gs[1, 1:3])
+    ax_mono = fig.add_subplot(gs[1, 3:5])
+
+    panels: list[tuple[plt.Axes, str, str]] = [
+        (ax_auto, "autocorrelation", "Autocorrelation"),
+        (ax_lin, "linearity", r"Linearity ($R^2$)"),
+        (ax_amp, "amplitude_dependence", "Amplitude Dependence"),
+    ]
+    for i, (ax, metric_key, ylabel) in enumerate(panels):
+        lm, ls, dm, ds = _compute_metric_mean_std(
+            dataset_fingerprints, lgta_variant, metric_key,
+        )
+        _draw_paired_bars(
+            ax, x, lm, ls, dm, ds, tick_labels, ylabel,
+            show_legend=(i == 0),
+        )
+
+    # Spearman rho
+    lm_rho, ls_rho, dm_rho, ds_rho = _compute_metric_mean_std(
+        dataset_fingerprints, lgta_variant, "spearman_rho",
+    )
+    has_rho = np.any(lm_rho != 0) or np.any(dm_rho != 0)
+    if has_rho:
+        _draw_paired_bars(
+            ax_rho, x, lm_rho, ls_rho, dm_rho, ds_rho,
+            tick_labels, r"Spearman $\rho$",
+        )
+    else:
+        ax_rho.text(
+            0.5, 0.5,
+            "No ρ data.\nRe-run per-dataset\nablation to populate.",
+            ha="center", va="center", fontsize=9, color="grey",
+            transform=ax_rho.transAxes,
+        )
+        ax_rho.set_ylabel(r"Spearman $\rho$", fontsize=10)
+
+    # Monotonic %
+    lm_mono, ls_mono, dm_mono, ds_mono = _compute_metric_mean_std(
+        dataset_fingerprints, lgta_variant, "monotonic",
+    )
+    has_mono = np.any(lm_mono != 0) or np.any(dm_mono != 0)
+    if has_mono:
+        _draw_paired_bars(
+            ax_mono, x,
+            lm_mono * 100.0, ls_mono * 100.0,
+            dm_mono * 100.0, ds_mono * 100.0,
+            tick_labels, "Monotonic (%)",
+        )
+        ax_mono.set_ylim(0.0, 105.0)
+    else:
+        ax_mono.text(
+            0.5, 0.5,
+            "No monotonic data.\nRe-run per-dataset\nablation to populate.",
+            ha="center", va="center", fontsize=9, color="grey",
+            transform=ax_mono.transAxes,
+        )
+        ax_mono.set_ylabel("Monotonic (%)", fontsize=10)
+
+    fig.suptitle(
+        "Transformation Signature & Controllability (avg ± std across datasets)",
+        fontsize=13, fontweight="bold",
+    )
+    out = base_output_dir / output_filename
+    plt.savefig(out, dpi=300, bbox_inches="tight")
+    print(f"Saved: {out}")
+    plt.close()
 
 
 FULL_LGTA_CONFIG_NAME = "D: Full L-GTA"
@@ -1343,6 +1738,7 @@ def plot_component_ablation(
     _plot_signature_comparison(results, output_dir)
     _plot_recon_vs_controllability(results, output_dir)
     write_ablation_table_md(results, sigma_values, output_dir)
+    _save_fingerprint_csv(results, output_dir)
 
 
 def _plot_monotonic_response_grid(
@@ -1609,6 +2005,8 @@ if __name__ == "__main__":
     if args.summaries_only:
         write_cross_dataset_ablation_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
         write_cross_dataset_comparison_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
+        plot_cross_dataset_signature_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
+        plot_cross_dataset_signature_summary_averaged(base_output_dir, DEFAULT_ABLATION_DATASETS)
         raise SystemExit(0)
 
     CACHE_ABLATION_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1652,6 +2050,8 @@ if __name__ == "__main__":
             run_one(dataset_name, freq)
         write_cross_dataset_ablation_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
         write_cross_dataset_comparison_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
+        plot_cross_dataset_signature_summary(base_output_dir, DEFAULT_ABLATION_DATASETS)
+        plot_cross_dataset_signature_summary_averaged(base_output_dir, DEFAULT_ABLATION_DATASETS)
     else:
         dataset_name = args.dataset if args.dataset is not None else "tourism"
         freq = args.freq
