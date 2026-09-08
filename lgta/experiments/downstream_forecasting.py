@@ -1063,6 +1063,11 @@ def _generate_benchmark_variants(
 _BENCHMARK_NAME_ALIASES: dict[str, str] = {
     "timegan": "TimeGANGenerator",
     "timevae": "TimeVAEGenerator",
+    "timevae_windowed": "TimeVAEWindowedGenerator",
+    "timevae-windowed": "TimeVAEWindowedGenerator",
+    "baseline_vae": "BaselineVAEGenerator",
+    "baseline-vae": "BaselineVAEGenerator",
+    "baselinevae": "BaselineVAEGenerator",
     "diffusion_ts": "DiffusionTSGenerator",
     "diffusion-ts": "DiffusionTSGenerator",
     "diffusiontsgenerator": "DiffusionTSGenerator",
@@ -1121,7 +1126,9 @@ def run_downstream_forecasting(
         method_canonical = _resolve_method_arg(method)
 
     if not cfg.benchmark_generators:
-        cfg.benchmark_generators = get_default_benchmark_generators(seed=SEED)
+        cfg.benchmark_generators = get_default_benchmark_generators(
+            seed=SEED, window_size=cfg.window_size
+        )
 
     dyn_label = "WITH" if cfg.use_dynamic_features else "WITHOUT"
     print("=" * 70)
@@ -1293,7 +1300,8 @@ def run_downstream_forecasting(
         if not benchmarks_to_run:
             raise ValueError(
                 f"Unknown or unavailable method: {method}. "
-                f"Choose from: original, lgta, timegan, timevae, diffusion-ts, direct."
+                f"Choose from: original, lgta, timegan, timevae, timevae_windowed, "
+                f"baseline_vae, diffusion-ts, direct."
             )
 
     if benchmarks_to_run:
@@ -2166,7 +2174,7 @@ if __name__ == "__main__":
         "--method",
         type=str,
         default=None,
-        help="Run only this method: original, lgta, timegan, timevae, diffusion-ts, direct (or class name e.g. TimeGANGenerator).",
+        help="Run only this method: original, lgta, timegan, timevae, timevae_windowed, baseline_vae, diffusion-ts, direct (or class name e.g. TimeGANGenerator).",
     )
     parser.add_argument(
         "--output-dir",
