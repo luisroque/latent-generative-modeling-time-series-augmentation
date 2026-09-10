@@ -9,6 +9,7 @@ num_layers-1, and the original loss/training schedule (E_loss, G_loss with
 gamma, two-moment loss, D only when loss > 0.15, generator 2x per step).
 """
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -129,6 +130,12 @@ class TimeGANGenerator(TimeSeriesGenerator):
         self.gamma = gamma
         self._min_val: np.ndarray
         self._max_val: np.ndarray
+        # Optional path for phase-level training checkpoints (embedder /
+        # supervisor / joint). When set, an interrupted fit() resumes at the
+        # next unfinished phase; per-phase wall times accumulate in
+        # self.phase_seconds. None (default) leaves training untouched.
+        self.checkpoint_path: Path | None = None
+        self.phase_seconds: dict[str, float] = {}
 
     def fit(self, data: np.ndarray) -> "TimeGANGenerator":
         """Fit using MinMax scaling as in original TimeGAN; then _fit."""
@@ -160,9 +167,48 @@ class TimeGANGenerator(TimeSeriesGenerator):
         self._gen = _Generator(z_dim, self.hidden_dim, self.n_layers).to(self.device)
         self._dis = _Discriminator(self.hidden_dim, self.n_layers).to(self.device)
 
-        self._train_embedder(X, ori_time, max_seq_len)
-        self._train_supervisor_only(X, ori_time, max_seq_len, z_dim)
-        self._train_joint(X, ori_time, max_seq_len, z_dim, no)
+        done_phases: set[str] = set()
+        self.phase_seconds = {}
+        if self.checkpoint_path is not None and self.checkpoint_path.exists():
+            state = torch.load(
+                self.checkpoint_path, map_location=self.device, weights_only=False
+            )
+            for net, key in self._net_items():
+                net.load_state_dict(state[key])
+            done_phases = set(state["done_phases"])
+            self.phase_seconds = dict(state["phase_seconds"])
+            print(f"  [TimeGAN] resuming after phase(s): {sorted(done_phases)}")
+
+        phases = [
+            ("embedder", lambda: self._train_embedder(X, ori_time, max_seq_len)),
+            (
+                "supervisor",
+                lambda: self._train_supervisor_only(X, ori_time, max_seq_len, z_dim),
+            ),
+            ("joint", lambda: self._train_joint(X, ori_time, max_seq_len, z_dim, no)),
+        ]
+        for phase_name, run_phase in phases:
+            if phase_name in done_phases:
+                continue
+            t0 = time.perf_counter()
+            run_phase()
+            self.phase_seconds[phase_name] = time.perf_counter() - t0
+            done_phases.add(phase_name)
+            if self.checkpoint_path is not None:
+                self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                state = {key: net.state_dict() for net, key in self._net_items()}
+                state["done_phases"] = sorted(done_phases)
+                state["phase_seconds"] = self.phase_seconds
+                torch.save(state, self.checkpoint_path)
+
+    def _net_items(self) -> list[tuple[nn.Module, str]]:
+        return [
+            (self._emb, "emb"),
+            (self._rec, "rec"),
+            (self._sup, "sup"),
+            (self._gen, "gen"),
+            (self._dis, "dis"),
+        ]
 
     def save_weights(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
